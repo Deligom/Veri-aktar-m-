@@ -49,6 +49,7 @@
     <div class="card muted">İki telefon aynı Wi-Fi ağında olsun, ya da biri diğerinin hotspot'una bağlansın. Eşleşme sırasında kamera izni istenecek.</div>
     <button id="btnSend">📤 Gönder (dosyalar bu telefonda)</button>
     <button id="btnRecv" class="sec">📥 Al (dosyalar bu telefona gelecek)</button>
+    <button id="btnInbox" class="sec" hidden></button>
     <p id="homeInfo" class="muted"></p>
   </section>
 
@@ -84,10 +85,12 @@
   </section>
 
   <section id="recv" hidden>
+    <button id="btnRecvPair" class="sec" hidden>📷 Gönderen telefona bağlan</button>
     <p id="recvStatus" class="muted">Gönderen telefonda dosyaları seçip “Gönder”e bas.</p>
+    <p id="recvNote" class="warn" hidden></p>
     <progress id="recvProg" value="0" max="1" hidden></progress>
     <button id="btnSave" disabled>Fotoğraflar'a kaydet</button>
-    <p class="muted">Paylaşım ekranı açılınca “Görüntüleri/Videoları Kaydet”i seç. Kaydedilenler bu uygulamadan otomatik silinir. Her seferinde en fazla 10 dosya gider, sonra butona tekrar bas.</p>
+    <p class="muted">Paylaşım ekranı açılınca “Görüntüleri/Videoları Kaydet”i seç. Kaydedilenler bu uygulamadan otomatik silinir. iPhone zorlanmasın diye her seferinde en fazla 10 dosya ya da 150 MB gider, büyük videolar tek tek; sonra butona tekrar bas.</p>
     <ul id="recvList"></ul>
     <button id="btnClear" class="sec" hidden>🗑 Bekleyenlerin hepsini sil</button>
   </section>
@@ -13016,8 +13019,9 @@ let worker = null, useOpfs = false, root = null, inited = false;
 const received = []; // {key, id, file, saved}
 let seq = Date.now();
 
-async function recvInit() {
-  if (inited) return;
+let initP = null;
+const recvInit = () => (initP ||= doRecvInit()); // açılışta ve "Al"da çağrılıyor; bir kez çalışır, ikisi de bitmesini bekler
+async function doRecvInit() {
   inited = true;
   try {
     root = await navigator.storage.getDirectory();
@@ -13051,6 +13055,7 @@ async function recvInit() {
   }
   for (const n of empty) await root.removeEntry(n).catch(() => {});
   received.sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }));
+  applyShareCrash();
 }
 
 async function onWorkerMsg(e) {
@@ -13121,14 +13126,70 @@ function receiverLost() {
   $('recvStatus').textContent = received.some((r) => !r.saved) ? 'Gelen dosyalar duruyor, bağlantı olmadan da kaydedebilirsin.' : '';
 }
 
+// ── Kaydetme grupları ──
+// iPhone'da paylaşım ekranı, dosyaların tamamını önce belleğe okuyor; toplam çok büyükse (ör. 10 dosya ≈ 750 MB)
+// tarayıcı sayfayı kapatıyor. Bu yüzden her seferinde en fazla 10 dosya / 150 MB, daha büyük dosyalar tek tek gider.
+// Yine de sayfa kapanırsa hangi dosyaların paylaşılmakta olduğu hatırlanır: grup ise o dosyalar artık tek tek,
+// tek dosya ise "çok büyük" sayılır ve indirme seçeneği sunulur.
+let SHARE_MAX = 150 * 1024 * 1024; const SHARE_FILES = 10;
+const LS_MARK = 'aktar-paylasiliyor', LS_FLAGS = 'aktar-boyut';
+const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (_) { return d; } };
+const lsSet = (k, v) => { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} };
+let shareFlags = lsGet(LS_FLAGS, {}); // dosya anahtarı -> 'solo' | 'big'
+function applyShareCrash() {
+  // Silinmiş dosyaların işaretlerini temizle
+  for (const k of Object.keys(shareFlags)) if (!received.some((r) => r.key === k)) delete shareFlags[k];
+  const keys = lsGet(LS_MARK, null); lsSet(LS_MARK, null);
+  const hit = Array.isArray(keys) ? received.filter((r) => keys.includes(r.key)) : [];
+  if (hit.length) {
+    for (const r of hit) shareFlags[r.key] = keys.length > 1 ? 'solo' : 'big';
+    $('recvNote').hidden = false;
+    $('recvNote').textContent = keys.length > 1
+      ? `⚠️ Önceki kaydetmede sayfa kapandı: ${keys.length} dosya birlikte iPhone için fazla büyüktü. Dosyalar kaybolmadı; bunlar artık tek tek kaydedilecek.`
+      : `⚠️ “${hit[0].file.name}” (${fmt(hit[0].file.size)}) paylaşım ekranı için fazla büyük, sayfa kapandı. Dosya kaybolmadı: yanındaki ⬇ ile indirmeyi dene (Dosyalar › İndirilenler'e gider, oradan Fotoğraflar'a kaydedebilirsin).`;
+  }
+  lsSet(LS_FLAGS, shareFlags);
+}
+function nextBatch() {
+  const pend = received.filter((r) => !r.saved && shareFlags[r.key] !== 'big');
+  if (!pend.length) return [];
+  const solo = (r) => r.file.size > SHARE_MAX || shareFlags[r.key] === 'solo';
+  if (solo(pend[0])) return [pend[0]];
+  const out = []; let sum = 0;
+  for (const r of pend) {
+    if (out.length >= SHARE_FILES) break;
+    if (solo(r) || sum + r.file.size > SHARE_MAX) continue; // büyükler sonra tek tek
+    out.push(r); sum += r.file.size;
+  }
+  return out;
+}
+
 function renderRecv() {
   const pending = received.filter((r) => !r.saved).length;
-  $('btnSave').disabled = !pending;
-  $('btnSave').textContent = pending ? `Fotoğraflar'a kaydet (${Math.min(10, pending)} / ${pending} bekliyor)` : 'Fotoğraflar\'a kaydet';
+  const next = nextBatch(), sum = next.reduce((a, r) => a + r.file.size, 0);
+  $('btnSave').disabled = !next.length;
+  $('btnSave').textContent = next.length
+    ? `Fotoğraflar'a kaydet: ${next.length} dosya, ${fmt(sum)}` + (pending > next.length ? ` (${pending} bekliyor)` : '')
+    : 'Fotoğraflar\'a kaydet';
   $('btnClear').hidden = pending < 2;
-  $('recvList').innerHTML = received.map((r) => r.saved
-    ? `<li class="saved"><span class="n">${esc(r.file.name)}</span><span class="s">kaydedildi ✓</span></li>`
-    : `<li class="ok"><span class="n">${esc(r.file.name)}</span><span class="s">${fmt(r.file.size)}</span><button class="del" data-k="${esc(r.key)}" aria-label="${esc(r.file.name)} sil">🗑</button></li>`).join('');
+  $('btnRecvPair').hidden = !!role;
+  $('recvList').innerHTML = received.map((r) => {
+    const k = esc(r.key), n = esc(r.file.name);
+    if (r.saved) return `<li class="saved"><span class="n">${n}</span><span class="s">kaydedildi ✓</span></li>`;
+    const big = shareFlags[r.key] === 'big';
+    return `<li class="${big ? 'bad' : 'ok'}"><span class="n">${n}</span><span class="s">${fmt(r.file.size)}</span>`
+      + (big ? `<button class="del" data-act="dl" data-k="${k}" aria-label="${n} indir">⬇</button>` : '')
+      + `<button class="del" data-act="del" data-k="${k}" aria-label="${n} sil">🗑</button></li>`;
+  }).join('');
+}
+
+// Paylaşım ekranı için çok büyük dosyayı indirme olarak ver (bitişini bilemediğimiz için otomatik silinmez)
+function downloadOne(key) {
+  const r = received.find((x) => x.key === key && !x.saved);
+  if (!r) return;
+  const a = document.createElement('a'); a.href = URL.createObjectURL(r.file); a.download = r.file.name;
+  document.body.appendChild(a); a.click(); a.remove();
+  $('recvStatus').textContent = `“${r.file.name}” indiriliyor. Bitince Dosyalar › İndirilenler'den Fotoğraflar'a kaydedip burada 🗑 ile silebilirsin.`;
 }
 
 // Uygulamanın deposundan (OPFS) sil. Kaydedilmiş dosyalar listede "kaydedildi ✓" olarak kalır (sadece bu oturumda).
@@ -13143,14 +13204,18 @@ async function removeStored(r) {
 // iOS: PWA galeriye doğrudan yazamaz; paylaşım ekranı → “Kaydet” ile Fotoğraflar'a gider.
 // Paylaşım tamamlanınca dosyalar uygulamadan otomatik silinir (yer kaplamasın).
 async function saveNext() {
-  const batch = received.filter((r) => !r.saved).slice(0, 10);
+  const batch = nextBatch();
   if (!batch.length) return;
   const data = { files: batch.map((r) => r.file) };
   let wait;
+  $('recvNote').hidden = true;
   if (navigator.canShare && navigator.canShare(data)) {
+    lsSet(LS_MARK, batch.map((r) => r.key)); // sayfa kapanırsa bir sonraki açılışta anlaşılsın
+    $('btnSave').disabled = true; $('btnSave').textContent = 'Paylaşım ekranı hazırlanıyor…';
     try { await navigator.share(data); }
-    catch (e) { if (e.name !== 'AbortError') logErr(e); return; } // vazgeçildiyse hiçbir şey silinmez
-    wait = 1500;
+    catch (e) { if (e.name !== 'AbortError') logErr(e); renderRecv(); return; } // vazgeçildiyse hiçbir şey silinmez
+    finally { lsSet(LS_MARK, null); }
+    wait = 0; // paylaşım ekranı dosyaları zaten okudu
   } else {
     // Paylaşım desteklenmiyorsa indirme olarak ver; indirme bitsin diye silmeden önce bekle
     for (const r of batch) {
@@ -13189,7 +13254,19 @@ async function deleteAll() {
 if (IS_ANDROID) { $('files').removeAttribute('accept'); $('pickHint').hidden = false; }
 $('btnSave').onclick = saveNext;
 $('btnClear').onclick = deleteAll;
-$('recvList').onclick = (e) => { const b = e.target.closest('button.del'); if (b) deleteOne(b.dataset.k); };
+$('recvList').onclick = (e) => {
+  const b = e.target.closest('button.del');
+  if (b) (b.dataset.act === 'dl' ? downloadOne : deleteOne)(b.dataset.k);
+};
+// Bu telefonda bekleyen dosyalar varmış (ör. sayfa kapandıysa): bağlanmadan da kaydedilip silinebilsin
+function updateInbox() {
+  const n = received.filter((r) => !r.saved).length;
+  $('btnInbox').hidden = !n || !!role;
+  $('btnInbox').textContent = `📂 Bu telefondaki ${n} dosya (kaydet / sil)`;
+}
+$('btnInbox').onclick = () => { show('recv'); $('conn').hidden = true; $('recvStatus').textContent = ''; renderRecv(); };
+$('btnRecvPair').onclick = () => startReceiver().catch(pairFail);
+recvInit().then(updateInbox).catch(() => {});
 const pairFail = (e) => { if (e === STOPPED) return; stopCam(); logErr(e); };
 $('btnSend').onclick = () => startSender().catch(pairFail);
 $('btnRecv').onclick = () => startReceiver().catch(pairFail);
@@ -13210,7 +13287,7 @@ if (!window.isSecureContext) $('homeInfo').textContent = 'Kamera için sayfa HTT
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 // Test için dışarı açılan fonksiyonlar
 window.__aktar = { createOffer, acceptAnswer, createAnswer, waitOpen, linkReady, setupSender, setupReceiver, recvInit, addFiles, sendAll, lost, show,
-  prepareStandby, dropLink: () => closePc(),
+  prepareStandby, dropLink: () => closePc(), nextBatch, setShareMax: (n) => { SHARE_MAX = n; renderRecv(); },
   standby: () => ({ mine: sbMine.length, answered: sbMine.filter((e) => e.answer).length, theirs: sbTheirs.length, live: sbLive.length }),
   queue, received, get dc() { return dc; }, set dc(v) { dc = v; }, get pc() { return pc; }, set role(v) { role = v; }, get linkUp() { return linkUp; } };
 </script>
