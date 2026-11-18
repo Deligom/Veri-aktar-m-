@@ -33,8 +33,9 @@
   .row { display:flex; gap:10px; } .row > * { flex:1; }
   progress { width:100%; height:10px; margin:8px 0; accent-color: var(--acc); }
   ul { list-style:none; padding:0; margin:10px 0; }
-  li { display:flex; justify-content:space-between; gap:8px; padding:8px 10px; border-bottom:1px solid var(--line); font-size:14px; }
-  li .n { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } li .s { color:var(--mut); white-space:nowrap; }
+  li { display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid var(--line); font-size:14px; min-height:44px; }
+  li .n { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } li .s { color:var(--mut); white-space:nowrap; }
+  li button.del { flex:none; width:auto; margin:0; padding:6px 10px; background:transparent; border:1px solid var(--line); border-radius:8px; font-size:16px; line-height:1; }
   li.ok .s { color: var(--ok); } li.bad .s { color: var(--err); } li.saved { opacity:.5; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px; margin:10px 0; }
   .err { color: var(--err); } .warn { color: var(--warn); }
@@ -86,9 +87,9 @@
     <p id="recvStatus" class="muted">Gönderen telefonda dosyaları seçip “Gönder”e bas.</p>
     <progress id="recvProg" value="0" max="1" hidden></progress>
     <button id="btnSave" disabled>Fotoğraflar'a kaydet</button>
-    <p class="muted">Paylaşım ekranı açılınca “Görüntüleri/Videoları Kaydet”i seç. Her seferinde en fazla 10 dosya gider, sonra butona tekrar bas.</p>
+    <p class="muted">Paylaşım ekranı açılınca “Görüntüleri/Videoları Kaydet”i seç. Kaydedilenler bu uygulamadan otomatik silinir. Her seferinde en fazla 10 dosya gider, sonra butona tekrar bas.</p>
     <ul id="recvList"></ul>
-    <button id="btnClear" class="sec">Kaydedilenleri sil (yer aç)</button>
+    <button id="btnClear" class="sec" hidden>🗑 Bekleyenlerin hepsini sil</button>
   </section>
 
   <p id="log" class="err"></p>
@@ -13054,7 +13055,7 @@ async function recvInit() {
 
 async function onWorkerMsg(e) {
   const m = e.data;
-  if (m.op === 'error') return logErr(m.name === 'QuotaExceededError' ? 'Telefonda yer kalmadı. Kaydettiklerini “Kaydedilenleri sil” ile silip yer aç.' : 'Kayıt hatası: ' + m.msg);
+  if (m.op === 'error') return logErr(m.name === 'QuotaExceededError' ? 'Telefonda yer kalmadı. Gelen dosyaları Fotoğraflar’a kaydet (kaydedilenler otomatik silinir) ya da gerekmeyenleri 🗑 ile sil.' : 'Kayıt hatası: ' + m.msg);
   if (m.op === 'closed') {
     const f = await (await root.getFileHandle(m.name)).getFile();
     finishFile(m.id, m.name, f);
@@ -13108,11 +13109,6 @@ function setupReceiver() {
   dc.binaryType = 'arraybuffer';
   dc.onmessage = onRecvMsg;
   cur = null; batch = null;
-  if (!setupReceiver.done) {
-    setupReceiver.done = true;
-    $('btnSave').onclick = saveNext;
-    $('btnClear').onclick = clearSaved;
-  }
   $('recvProg').hidden = true;
   $('recvStatus').textContent = 'Gönderen telefonda dosyaları seçip “Gönder”e bas.';
   // Elimizdekileri bildir: bağlantı koptuysa gönderen bunları tekrar yollamaz
@@ -13129,38 +13125,71 @@ function renderRecv() {
   const pending = received.filter((r) => !r.saved).length;
   $('btnSave').disabled = !pending;
   $('btnSave').textContent = pending ? `Fotoğraflar'a kaydet (${Math.min(10, pending)} / ${pending} bekliyor)` : 'Fotoğraflar\'a kaydet';
-  $('recvList').innerHTML = received.map((r) => `<li class="${r.saved ? 'saved' : 'ok'}"><span class="n">${esc(r.file.name)}</span><span class="s">${r.saved ? 'paylaşıldı' : fmt(r.file.size)}</span></li>`).join('');
+  $('btnClear').hidden = pending < 2;
+  $('recvList').innerHTML = received.map((r) => r.saved
+    ? `<li class="saved"><span class="n">${esc(r.file.name)}</span><span class="s">kaydedildi ✓</span></li>`
+    : `<li class="ok"><span class="n">${esc(r.file.name)}</span><span class="s">${fmt(r.file.size)}</span><button class="del" data-k="${esc(r.key)}" aria-label="${esc(r.file.name)} sil">🗑</button></li>`).join('');
+}
+
+// Uygulamanın deposundan (OPFS) sil. Kaydedilmiş dosyalar listede "kaydedildi ✓" olarak kalır (sadece bu oturumda).
+async function removeStored(r) {
+  if (!useOpfs) return;
+  for (let i = 0; i < 5; i++) {
+    try { await root.removeEntry(r.key); return; }
+    catch (e) { if (e.name === 'NotFoundError') return; await sleep(300); }
+  }
 }
 
 // iOS: PWA galeriye doğrudan yazamaz; paylaşım ekranı → “Kaydet” ile Fotoğraflar'a gider.
+// Paylaşım tamamlanınca dosyalar uygulamadan otomatik silinir (yer kaplamasın).
 async function saveNext() {
   const batch = received.filter((r) => !r.saved).slice(0, 10);
   if (!batch.length) return;
   const data = { files: batch.map((r) => r.file) };
+  let wait;
   if (navigator.canShare && navigator.canShare(data)) {
-    try { await navigator.share(data); batch.forEach((r) => (r.saved = true)); }
-    catch (e) { if (e.name !== 'AbortError') logErr(e); }
+    try { await navigator.share(data); }
+    catch (e) { if (e.name !== 'AbortError') logErr(e); return; } // vazgeçildiyse hiçbir şey silinmez
+    wait = 1500;
   } else {
-    // Paylaşım desteklenmiyorsa indirme olarak ver
+    // Paylaşım desteklenmiyorsa indirme olarak ver; indirme bitsin diye silmeden önce bekle
     for (const r of batch) {
       const a = document.createElement('a'); a.href = URL.createObjectURL(r.file); a.download = r.file.name; a.click();
-      r.saved = true; await sleep(400);
+      await sleep(400);
     }
+    wait = 120000;
   }
+  batch.forEach((r) => (r.saved = true));
+  const left = received.filter((r) => !r.saved).length;
+  $('recvStatus').textContent = `${batch.length} dosya kaydedildi, uygulamadan silindi.` + (left ? ` ${left} dosya daha bekliyor: butona tekrar bas.` : '');
   renderRecv();
+  await sleep(wait);
+  for (const r of batch) await removeStored(r);
 }
 
-async function clearSaved() {
-  const done = received.filter((r) => r.saved);
-  if (!done.length) return;
-  if (!confirm(`${done.length} paylaşılmış dosya bu uygulamanın alanından silinsin mi? (Fotoğraflar'a kaydettiklerin etkilenmez)`)) return;
-  for (const r of done) { if (useOpfs) { try { await root.removeEntry(r.key); } catch (_) {} } received.splice(received.indexOf(r), 1); }
+async function deleteOne(key) {
+  const r = received.find((x) => x.key === key && !x.saved);
+  if (!r) return;
+  if (!confirm(`“${r.file.name}” silinsin mi?\nFotoğraflar'a kaydetmediysen geri gelmez.`)) return;
+  received.splice(received.indexOf(r), 1); renderRecv();
+  await removeStored(r);
+}
+
+async function deleteAll() {
+  const list = received.filter((r) => !r.saved);
+  if (!list.length) return;
+  if (!confirm(`Bekleyen ${list.length} dosyanın hepsi silinsin mi?\nFotoğraflar'a kaydetmediklerin geri gelmez.`)) return;
+  for (const r of list) received.splice(received.indexOf(r), 1);
   renderRecv();
+  for (const r of list) await removeStored(r);
 }
 
 // ───────────────────────── Başlat ─────────────────────────
 // Android'de galeri seçicisi bazı dosyaları okutmuyor; dosya yöneticisi sorunsuz. Bu yüzden Android'de dosya yöneticisi açılır.
 if (IS_ANDROID) { $('files').removeAttribute('accept'); $('pickHint').hidden = false; }
+$('btnSave').onclick = saveNext;
+$('btnClear').onclick = deleteAll;
+$('recvList').onclick = (e) => { const b = e.target.closest('button.del'); if (b) deleteOne(b.dataset.k); };
 const pairFail = (e) => { if (e === STOPPED) return; stopCam(); logErr(e); };
 $('btnSend').onclick = () => startSender().catch(pairFail);
 $('btnRecv').onclick = () => startReceiver().catch(pairFail);
