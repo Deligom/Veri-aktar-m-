@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Aktar">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<title>Aktar</title>
+<style>
+  :root { color-scheme: dark; --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --fg:#e8eaf0; --mut:#8b93a5; --acc:#4f8cff; --ok:#3ccf8e; --err:#ff6b6b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.45 -apple-system,system-ui,Segoe UI,Roboto,sans-serif;
+         padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
+  main { max-width: 520px; margin: 0 auto; }
+  h1 { font-size: 28px; margin: 8px 0 4px; } h2 { font-size: 20px; margin: 4px 0 8px; }
+  p { margin: 6px 0; } .muted { color: var(--mut); font-size: 14px; }
+  button, .pick { display:block; width:100%; padding:14px 16px; margin:10px 0; border:0; border-radius:12px; background:var(--acc);
+         color:#fff; font:600 17px/1.2 inherit; text-align:center; cursor:pointer; }
+  button.sec { background: var(--card); border:1px solid var(--line); color: var(--fg); }
+  button:disabled { opacity:.45; }
+  .pick input { display:none; }
+  #qrBox { background:#fff; border-radius:12px; padding:10px; margin:12px auto; max-width: 360px; }
+  #qrBox svg { display:block; width:100%; height:auto; }
+  #camBox { position:relative; border-radius:12px; overflow:hidden; background:#000; margin:12px auto; max-width:360px; aspect-ratio: 1; }
+  #cam { width:100%; height:100%; object-fit:cover; }
+  #camBox::after { content:""; position:absolute; inset:14%; border:2px solid rgba(255,255,255,.7); border-radius:12px; }
+  .row { display:flex; gap:10px; } .row > * { flex:1; }
+  progress { width:100%; height:10px; margin:8px 0; accent-color: var(--acc); }
+  ul { list-style:none; padding:0; margin:10px 0; }
+  li { display:flex; justify-content:space-between; gap:8px; padding:8px 10px; border-bottom:1px solid var(--line); font-size:14px; }
+  li .n { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } li .s { color:var(--mut); white-space:nowrap; }
+  li.ok .s { color: var(--ok); } li.saved { opacity:.5; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px; margin:10px 0; }
+  .err { color: var(--err); }
+</style>
+</head>
+<body>
+<main>
+  <section id="home">
+    <h1>Aktar</h1>
+    <p class="muted">Fotoğraf ve videoları iki telefon arasında doğrudan aktarır. Veriler hiçbir sunucudan geçmez.</p>
+    <div class="card muted">İki telefon aynı Wi-Fi ağında olsun, ya da biri diğerinin hotspot'una bağlansın. Eşleşme sırasında kamera izni istenecek.</div>
+    <button id="btnSend">📤 Gönder (dosyalar bu telefonda)</button>
+    <button id="btnRecv" class="sec">📥 Al (dosyalar bu telefona gelecek)</button>
+    <p id="homeInfo" class="muted"></p>
+  </section>
+
+  <section id="pair" hidden>
+    <h2 id="pairTitle"></h2>
+    <p id="pairHint" class="muted"></p>
+    <div id="qrBox" hidden></div>
+    <div id="camBox" hidden><video id="cam" playsinline muted autoplay></video></div>
+    <p id="pairStatus" class="muted"></p>
+    <button id="btnCancel" class="sec">Vazgeç</button>
+  </section>
+
+  <section id="send" hidden>
+    <h2>Bağlandı ✓</h2>
+    <label class="pick" id="pickLbl">Fotoğraf / video seç<input type="file" id="files" multiple accept="image/*,video/*"></label>
+    <p id="sendSummary" class="muted"></p>
+    <button id="btnStart" disabled>Gönder</button>
+    <progress id="sendProg" value="0" max="1" hidden></progress>
+    <p id="sendStatus" class="muted"></p>
+    <ul id="sendList"></ul>
+  </section>
+
+  <section id="recv" hidden>
+    <h2>Bağlandı ✓</h2>
+    <p id="recvStatus" class="muted">Gönderen telefonda dosyaları seçip “Gönder”e bas.</p>
+    <progress id="recvProg" value="0" max="1" hidden></progress>
+    <button id="btnSave" disabled>Fotoğraflar'a kaydet</button>
+    <p class="muted">Paylaşım ekranı açılınca “Görüntüleri/Videoları Kaydet”i seç. Her seferinde en fazla 10 dosya gider, sonra butona tekrar bas.</p>
+    <ul id="recvList"></ul>
+    <button id="btnClear" class="sec">Kaydedilenleri sil (yer aç)</button>
+  </section>
+
+  <p id="log" class="err"></p>
+</main>
+
+<script>/*__LIBS__*/</script>
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const SECTIONS = ['home', 'pair', 'send', 'recv'];
+const show = (id) => SECTIONS.forEach((s) => ($(s).hidden = s !== id));
+const fmt = (b) => b < 1024 ? b + ' B' : b < 1 << 20 ? (b / 1024).toFixed(0) + ' KB' : b < 1 << 30 ? (b / 1048576).toFixed(1) + ' MB' : (b / 1073741824).toFixed(2) + ' GB';
+const logErr = (e) => { console.error(e); $('log').textContent = '⚠️ ' + (e && e.message ? e.message : e); };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const MIME = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', heic: 'image/heic', heif: 'image/heif', webp: 'image/webp', gif: 'image/gif',
+  dng: 'image/x-adobe-dng', mp4: 'video/mp4', m4v: 'video/x-m4v', mov: 'video/quicktime', '3gp': 'video/3gpp', webm: 'video/webm', mkv: 'video/x-matroska' };
+const guessMime = (name) => MIME[(name.split('.').pop() || '').toLowerCase()] || 'application/octet-stream';
+
+// ───────────────────────── Ekran açık kalsın ─────────────────────────
+let wakeLock = null;
+async function keepAwake() {
+  try { if ('wakeLock' in navigator && document.visibilityState === 'visible') wakeLock = await navigator.wakeLock.request('screen'); } catch (_) {}
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && pc) keepAwake(); });
+
+// ───────────────────────── SDP <-> QR metni ─────────────────────────
+// SDP sıkıştırılıp base64 yapılır. Önek: A1:o: (teklif) / A1:a: (cevap)
+const toB64 = (buf) => { let s = ''; const u = new Uint8Array(buf); for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s); };
+const fromB64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+function slimSdp(sdp) {
+  // Sadece UDP adayları kalsın, gereksiz satırlar çıksın → QR küçülür
+  return sdp.split(/\r?\n/).filter((l) => l && !/^a=candidate:.* tcp /i.test(l) && !/^a=ice-options:/.test(l) && !/^a=extmap-allow-mixed/.test(l)).join('\r\n') + '\r\n';
+}
+async function pack(sdp) {
+  const s = new Blob([slimSdp(sdp)]).stream().pipeThrough(new CompressionStream('deflate-raw'));
+  return toB64(await new Response(s).arrayBuffer());
+}
+async function unpack(b64) {
+  const s = new Blob([fromB64(b64)]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return await new Response(s).text();
+}
+function renderQr(text) {
+  const qr = qrcode(0, 'L'); qr.addData(text, 'Byte'); qr.make();
+  $('qrBox').innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+  $('qrBox').hidden = false;
+}
+
+// ───────────────────────── Kamera + QR okuma ─────────────────────────
+// Not: Kamera izni açıkken tarayıcılar gerçek yerel IP adreslerini WebRTC'ye veriyor (yoksa .local mDNS adları
+// kullanılıyor ve bazı ağlarda bağlantı kurulamıyor). Bu yüzden kamera, bağlantı açılana kadar açık tutuluyor.
+let camStream = null, scanning = false;
+async function startCam() {
+  camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 1280 } }, audio: false });
+  $('cam').srcObject = camStream; await $('cam').play().catch(() => {});
+}
+function stopCam() { scanning = false; if (camStream) camStream.getTracks().forEach((t) => t.stop()); camStream = null; $('camBox').hidden = true; }
+function scanFor(prefix) {
+  scanning = true; $('camBox').hidden = false;
+  const v = $('cam'), c = document.createElement('canvas'), ctx = c.getContext('2d', { willReadFrequently: true });
+  return new Promise((resolve, reject) => {
+    const tick = () => {
+      if (!scanning) return reject(new Error('Tarama durduruldu'));
+      if (v.readyState >= 2 && v.videoWidth) {
+        const k = Math.min(1, 900 / Math.max(v.videoWidth, v.videoHeight));
+        c.width = Math.round(v.videoWidth * k); c.height = Math.round(v.videoHeight * k);
+        ctx.drawImage(v, 0, 0, c.width, c.height);
+        const r = jsQR(ctx.getImageData(0, 0, c.width, c.height).data, c.width, c.height, { inversionAttempts: 'dontInvert' });
+        if (r && r.data && r.data.startsWith(prefix)) { scanning = false; return resolve(r.data.slice(prefix.length)); }
+      }
+      setTimeout(tick, 120);
+    };
+    tick();
+  });
+}
+
+// ───────────────────────── WebRTC ─────────────────────────
+let pc = null, dc = null;
+function newPc() {
+  pc = new RTCPeerConnection({ iceServers: [] }); // STUN/TURN yok: sadece yerel ağ
+  pc.onconnectionstatechange = () => {
+    const s = pc.connectionState;
+    if (s === 'failed') logErr('Bağlantı kurulamadı. İki telefon aynı ağda mı? (Misafir ağları cihazları birbirinden yalıtabilir; hotspot dene.)');
+    if (s === 'disconnected' || s === 'closed') $('log').textContent = '⚠️ Bağlantı koptu.';
+  };
+  return pc;
+}
+function waitIce() {
+  return new Promise((res) => {
+    if (pc.iceGatheringState === 'complete') return res();
+    const t = setTimeout(res, 4000);
+    pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') { clearTimeout(t); res(); } });
+  });
+}
+const waitOpen = (ch) => new Promise((res, rej) => { if (ch.readyState === 'open') return res(); ch.onopen = () => res(); ch.onerror = (e) => rej(e.error || e); });
+
+// Gönderen: teklif üretir, QR gösterir, cevabı tarar
+async function createOffer() {
+  newPc();
+  dc = pc.createDataChannel('aktar', { ordered: true });
+  await pc.setLocalDescription(await pc.createOffer());
+  await waitIce();
+  return 'A1:o:' + await pack(pc.localDescription.sdp);
+}
+async function acceptAnswer(b64) { await pc.setRemoteDescription({ type: 'answer', sdp: await unpack(b64) }); await waitOpen(dc); }
+
+// Alan: teklifi okur, cevap üretir
+async function createAnswer(b64) {
+  newPc();
+  const gotDc = new Promise((res) => (pc.ondatachannel = (e) => res(e.channel)));
+  await pc.setRemoteDescription({ type: 'offer', sdp: await unpack(b64) });
+  await pc.setLocalDescription(await pc.createAnswer());
+  await waitIce();
+  return { code: 'A1:a:' + await pack(pc.localDescription.sdp), channel: gotDc };
+}
+
+// ───────────────────────── Eşleşme ekranları ─────────────────────────
+async function startSender() {
+  show('pair'); keepAwake();
+  $('pairTitle').textContent = 'Gönderen';
+  $('pairStatus').textContent = 'Kamera açılıyor…';
+  await startCam();
+  $('pairStatus').textContent = 'Bağlantı kodu hazırlanıyor…';
+  renderQr(await createOffer());
+  $('pairHint').textContent = '1) Diğer telefonda “Al”a bas ve bu QR’ı okut. 2) Sonra onun ekranında çıkan QR’ı bu telefonun kamerasına (aşağıda) göster.';
+  $('pairStatus').textContent = 'Cevap QR’ı bekleniyor…';
+  const ans = await scanFor('A1:a:');
+  $('qrBox').hidden = true; $('pairStatus').textContent = 'Bağlanıyor…';
+  await acceptAnswer(ans);
+  stopCam(); setupSender(); show('send');
+}
+async function startReceiver() {
+  show('pair'); keepAwake(); await recvInit();
+  $('pairTitle').textContent = 'Alan';
+  $('pairHint').textContent = 'Gönderen telefonun ekranındaki QR’ı okut.';
+  $('pairStatus').textContent = 'Kamera açılıyor…';
+  await startCam();
+  $('pairStatus').textContent = 'QR bekleniyor…';
+  const offer = await scanFor('A1:o:');
+  $('pairStatus').textContent = 'Cevap hazırlanıyor…';
+  const { code, channel } = await createAnswer(offer);
+  renderQr(code);
+  $('pairHint').textContent = 'Şimdi bu QR’ı gönderen telefonun kamerasına göster.';
+  $('pairStatus').textContent = 'Bağlantı bekleniyor…';
+  dc = await channel; await waitOpen(dc);
+  stopCam(); $('qrBox').hidden = true; setupReceiver(); show('recv');
+}
+
+// ───────────────────────── Gönderme ─────────────────────────
+let picked = [];
+function setupSender() {
+  $('files').onchange = () => {
+    picked = Array.from($('files').files || []);
+    const total = picked.reduce((a, f) => a + f.size, 0);
+    $('sendSummary').textContent = picked.length ? `${picked.length} dosya, toplam ${fmt(total)}` : '';
+    $('btnStart').disabled = !picked.length;
+    $('sendList').innerHTML = picked.map((f, i) => `<li id="s${i}"><span class="n">${esc(f.name)}</span><span class="s">${fmt(f.size)}</span></li>`).join('');
+  };
+  $('btnStart').onclick = () => sendAll(picked).catch(logErr);
+  dc.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.t === 'ack') { const li = $('s' + m.i); if (li) { li.classList.add('ok'); li.querySelector('.s').textContent = '✓ alındı'; } acked++; updateAckStatus(); }
+  };
+}
+let acked = 0, sendCount = 0;
+function updateAckStatus() { if (sendCount && acked >= sendCount) $('sendStatus').textContent = `Tamamlandı ✓ ${sendCount} dosya karşı tarafta.`; }
+const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+async function sendAll(files) {
+  $('btnStart').disabled = true; $('pickLbl').hidden = true;
+  acked = 0; sendCount = files.length;
+  const CHUNK = 64 * 1024, READ = 4 << 20, HIGH = 8 << 20;
+  dc.bufferedAmountLowThreshold = 1 << 20;
+  const drain = () => new Promise((res) => {
+    if (dc.bufferedAmount <= dc.bufferedAmountLowThreshold) return res();
+    dc.addEventListener('bufferedamountlow', res, { once: true });
+  });
+  const total = files.reduce((a, f) => a + f.size, 0);
+  let sent = 0; const t0 = performance.now();
+  const prog = $('sendProg'); prog.hidden = false; prog.max = total || 1;
+  dc.send(JSON.stringify({ t: 'batch', count: files.length, total }));
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    if (dc.readyState !== 'open') throw new Error('Bağlantı koptu, gönderim yarıda kaldı.');
+    dc.send(JSON.stringify({ t: 'file', i, name: f.name, size: f.size, type: f.type || guessMime(f.name), lm: f.lastModified }));
+    for (let off = 0; off < f.size; off += READ) {
+      const buf = await f.slice(off, off + READ).arrayBuffer();
+      for (let p = 0; p < buf.byteLength; p += CHUNK) {
+        if (dc.bufferedAmount > HIGH) await drain();
+        if (dc.readyState !== 'open') throw new Error('Bağlantı koptu, gönderim yarıda kaldı.');
+        dc.send(buf.slice(p, p + CHUNK));
+      }
+      sent += buf.byteLength; prog.value = sent;
+      const sec = (performance.now() - t0) / 1000;
+      $('sendStatus').textContent = `${i + 1}/${files.length} · ${fmt(sent)} / ${fmt(total)} · ${fmt(sent / Math.max(sec, 0.1))}/s`;
+    }
+    dc.send(JSON.stringify({ t: 'end', i }));
+  }
+  dc.send(JSON.stringify({ t: 'done' }));
+  await drain();
+  if (acked < sendCount) $('sendStatus').textContent += ' · karşı tarafın kaydetmesi bekleniyor…';
+  updateAckStatus();
+}
+
+// ───────────────────────── Alma (OPFS'e diske yazma) ─────────────────────────
+// Büyük videolar RAM'e alınmasın diye parçalar bir Worker içinde OPFS'e (tarayıcının özel dosya alanı) yazılıyor.
+const WORKER_SRC = `
+let h = null, pos = 0, q = Promise.resolve();
+async function handle(m) {
+  if (m.op === 'probe') { const r = await navigator.storage.getDirectory(); const fh = await r.getFileHandle('.probe', { create: true });
+    const x = await fh.createSyncAccessHandle(); x.close(); await r.removeEntry('.probe'); postMessage({ op: 'probe', ok: true }); return; }
+  if (m.op === 'open') { const r = await navigator.storage.getDirectory(); const fh = await r.getFileHandle(m.name, { create: true });
+    h = await fh.createSyncAccessHandle(); h.truncate(0); pos = 0; return; }
+  if (m.op === 'write') { const u = new Uint8Array(m.buf); let w = 0; while (w < u.length) w += h.write(u.subarray(w), { at: pos + w }); pos += u.length; return; }
+  if (m.op === 'close') { h.flush(); h.close(); h = null; postMessage({ op: 'closed', id: m.id, name: m.name }); return; }
+}
+onmessage = (e) => { q = q.then(() => handle(e.data)).catch((err) => postMessage({ op: 'error', msg: String(err && err.message || err), probe: e.data.op === 'probe' })); };
+`;
+let worker = null, useOpfs = false, root = null;
+const received = []; // {name, file, saved}
+let seq = Date.now();
+
+async function recvInit() {
+  try {
+    root = await navigator.storage.getDirectory();
+    worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' })));
+    useOpfs = await new Promise((res) => {
+      const t = setTimeout(() => res(false), 3000);
+      worker.onmessage = (e) => { if (e.data.op === 'probe' || e.data.probe) { clearTimeout(t); res(!!e.data.ok); } };
+      worker.postMessage({ op: 'probe' });
+    });
+  } catch (_) { useOpfs = false; }
+  if (useOpfs) {
+    // Önceki oturumdan kalan (kaydedilmemiş) dosyaları da listele — sayfa çökse bile kaybolmasın
+    for await (const [n, hnd] of root.entries()) {
+      if (hnd.kind !== 'file' || n.startsWith('.')) continue;
+      const f = await hnd.getFile(); if (!f.size) { await root.removeEntry(n); continue; }
+      const orig = n.replace(/^\d+_\d+__/, '');
+      received.push({ key: n, file: new File([f], orig, { type: guessMime(orig), lastModified: f.lastModified }), saved: false });
+    }
+    received.sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }));
+  }
+}
+
+function setupReceiver() {
+  dc.binaryType = 'arraybuffer';
+  let cur = null, batch = null, gotTotal = 0;
+  const prog = $('recvProg');
+  if (useOpfs) worker.onmessage = async (e) => {
+    const m = e.data;
+    if (m.op === 'error') return logErr('Kayıt hatası: ' + m.msg);
+    if (m.op === 'closed') {
+      const fh = await root.getFileHandle(m.name); const f = await fh.getFile();
+      finishFile(m.id, m.name, f);
+    }
+  };
+  const meta = {};
+  function finishFile(id, key, blob) {
+    const md = meta[id];
+    const file = new File([blob], md.name, { type: md.type, lastModified: md.lm });
+    received.push({ key, file, saved: false });
+    dc.send(JSON.stringify({ t: 'ack', i: id }));
+    renderRecv();
+  }
+  dc.onmessage = (e) => {
+    if (typeof e.data === 'string') {
+      const m = JSON.parse(e.data);
+      if (m.t === 'batch') { batch = m; gotTotal = 0; prog.hidden = false; prog.max = m.total || 1; prog.value = 0; }
+      else if (m.t === 'file') {
+        const key = `${seq++}_${m.i}__${m.name.replace(/[\\/:*?"<>|]/g, '_')}`;
+        meta[m.i] = { name: m.name, type: m.type || guessMime(m.name), lm: m.lm };
+        cur = { i: m.i, key, size: m.size, got: 0, chunks: [] };
+        if (useOpfs) worker.postMessage({ op: 'open', name: key });
+      } else if (m.t === 'end') {
+        if (useOpfs) worker.postMessage({ op: 'close', id: cur.i, name: cur.key });
+        else finishFile(cur.i, cur.key, new Blob(cur.chunks));
+        cur = null;
+      } else if (m.t === 'done') {
+        $('recvStatus').textContent = `Aktarım bitti: ${batch ? batch.count : ''} dosya. Şimdi “Fotoğraflar'a kaydet”e bas.`;
+      }
+      return;
+    }
+    // ikili parça
+    const buf = e.data;
+    if (!cur) return;
+    if (useOpfs) worker.postMessage({ op: 'write', buf }, [buf]); else cur.chunks.push(buf);
+    cur.got += buf.byteLength; gotTotal += buf.byteLength; prog.value = gotTotal;
+    $('recvStatus').textContent = `Alınıyor ${(batch ? Object.keys(meta).length + '/' + batch.count : '')} · ${fmt(gotTotal)}${batch ? ' / ' + fmt(batch.total) : ''}`;
+  };
+  $('btnSave').onclick = saveNext;
+  $('btnClear').onclick = clearSaved;
+  renderRecv();
+}
+
+function renderRecv() {
+  const pending = received.filter((r) => !r.saved).length;
+  $('btnSave').disabled = !pending;
+  $('btnSave').textContent = pending ? `Fotoğraflar'a kaydet (${Math.min(10, pending)} / ${pending} bekliyor)` : 'Fotoğraflar\'a kaydet';
+  $('recvList').innerHTML = received.map((r) => `<li class="${r.saved ? 'saved' : 'ok'}"><span class="n">${esc(r.file.name)}</span><span class="s">${r.saved ? 'paylaşıldı' : fmt(r.file.size)}</span></li>`).join('');
+}
+
+// iOS: PWA galeriye doğrudan yazamaz; paylaşım ekranı → “Kaydet” ile Fotoğraflar'a gider.
+async function saveNext() {
+  const batch = received.filter((r) => !r.saved).slice(0, 10);
+  if (!batch.length) return;
+  const data = { files: batch.map((r) => r.file) };
+  if (navigator.canShare && navigator.canShare(data)) {
+    try { await navigator.share(data); batch.forEach((r) => (r.saved = true)); }
+    catch (e) { if (e.name !== 'AbortError') logErr(e); }
+  } else {
+    // Paylaşım desteklenmiyorsa indirme olarak ver
+    for (const r of batch) {
+      const a = document.createElement('a'); a.href = URL.createObjectURL(r.file); a.download = r.file.name; a.click();
+      r.saved = true; await sleep(400);
+    }
+  }
+  renderRecv();
+}
+
+async function clearSaved() {
+  const done = received.filter((r) => r.saved);
+  if (!done.length) return;
+  if (!confirm(`${done.length} paylaşılmış dosya bu uygulamanın alanından silinsin mi? (Fotoğraflar'a kaydettiklerin etkilenmez)`)) return;
+  for (const r of done) { if (useOpfs) { try { await root.removeEntry(r.key); } catch (_) {} } received.splice(received.indexOf(r), 1); }
+  renderRecv();
+}
+
+// ───────────────────────── Başlat ─────────────────────────
+$('btnSend').onclick = () => startSender().catch((e) => { stopCam(); logErr(e); });
+$('btnRecv').onclick = () => startReceiver().catch((e) => { stopCam(); logErr(e); });
+$('btnCancel').onclick = () => location.reload();
+if (!window.RTCPeerConnection || !window.CompressionStream) $('homeInfo').textContent = 'Bu tarayıcı desteklenmiyor (güncel Chrome / Safari gerekli).';
+if (!window.isSecureContext) $('homeInfo').textContent = 'Kamera için sayfa HTTPS üzerinden açılmalı.';
+if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+// Test için dışarı açılan fonksiyonlar
+window.__aktar = { createOffer, acceptAnswer, createAnswer, setupSender, setupReceiver, recvInit, sendAll, get dc() { return dc; }, set dc(v) { dc = v; }, received };
+</script>
+</body>
+</html>
