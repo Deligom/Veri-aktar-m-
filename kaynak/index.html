@@ -12,7 +12,8 @@
 <link rel="icon" href="icon-192.png">
 <title>Aktar</title>
 <style>
-  :root { color-scheme: dark; --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --fg:#e8eaf0; --mut:#8b93a5; --acc:#4f8cff; --ok:#3ccf8e; --err:#ff6b6b; }
+  :root { color-scheme: dark; --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --fg:#e8eaf0; --mut:#8b93a5; --acc:#4f8cff; --ok:#3ccf8e; --err:#ff6b6b; --warn:#ffcf5c; }
+  [hidden] { display: none !important; }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.45 -apple-system,system-ui,Segoe UI,Roboto,sans-serif;
          padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
@@ -21,7 +22,7 @@
   p { margin: 6px 0; } .muted { color: var(--mut); font-size: 14px; }
   button, .pick { display:block; width:100%; padding:14px 16px; margin:10px 0; border:0; border-radius:12px; background:var(--acc);
          color:#fff; font:600 17px/1.2 inherit; text-align:center; cursor:pointer; }
-  button.sec { background: var(--card); border:1px solid var(--line); color: var(--fg); }
+  button.sec, .pick.sec { background: var(--card); border:1px solid var(--line); color: var(--fg); }
   button:disabled { opacity:.45; }
   .pick input { display:none; }
   #qrBox { background:#fff; border-radius:12px; padding:10px; margin:12px auto; max-width: 360px; }
@@ -34,9 +35,9 @@
   ul { list-style:none; padding:0; margin:10px 0; }
   li { display:flex; justify-content:space-between; gap:8px; padding:8px 10px; border-bottom:1px solid var(--line); font-size:14px; }
   li .n { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } li .s { color:var(--mut); white-space:nowrap; }
-  li.ok .s { color: var(--ok); } li.saved { opacity:.5; }
+  li.ok .s { color: var(--ok); } li.bad .s { color: var(--err); } li.saved { opacity:.5; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px; margin:10px 0; }
-  .err { color: var(--err); }
+  .err { color: var(--err); } .warn { color: var(--warn); }
 </style>
 </head>
 <body>
@@ -59,9 +60,21 @@
     <button id="btnCancel" class="sec">Vazgeç</button>
   </section>
 
+  <section id="conn" hidden>
+    <h2 id="connTitle">Bağlandı ✓</h2>
+    <p id="connMsg" class="muted" hidden></p>
+    <button id="btnReconnect" hidden>🔄 Yeniden bağlan</button>
+    <p class="muted">Aktarım bitene kadar iki telefonda da bu sayfa açık kalsın. Başka uygulamaya geçilirse ya da ekran kilitlenirse bağlantı kopar.</p>
+    <p id="awakeInfo" class="muted warn" hidden>⚠️ Bu tarayıcı ekranı açık tutamıyor. Aktarım bitene kadar ekran kilitlenmesin: ara ara ekrana dokun ya da otomatik kilidi geçici olarak kapat (iPhone: Ayarlar › Ekran ve Parlaklık › Otomatik Kilit).</p>
+  </section>
+
   <section id="send" hidden>
-    <h2>Bağlandı ✓</h2>
-    <label class="pick" id="pickLbl">Fotoğraf / video seç<input type="file" id="files" multiple accept="image/*,video/*"></label>
+    <label class="pick" id="pickLbl"><span id="pickTxt">Fotoğraf / video seç</span><input type="file" id="files" multiple accept="image/*,video/*"></label>
+    <div id="readHelp" class="card" hidden>
+      <p class="warn">⚠️ Bazı dosyalar okunamadı.</p>
+      <p class="muted">Bu genelde Android’de galeriden seçilen videolarda olur. Aynı dosyayı aşağıdaki butonla dosya yöneticisinden seçmeyi dene (Dosyalarım › Videolar ya da DCIM › Camera klasörü).</p>
+      <label class="pick sec" id="pickLbl2">📁 Dosyalar’dan seç<input type="file" id="files2" multiple></label>
+    </div>
     <p id="sendSummary" class="muted"></p>
     <button id="btnStart" disabled>Gönder</button>
     <progress id="sendProg" value="0" max="1" hidden></progress>
@@ -70,7 +83,6 @@
   </section>
 
   <section id="recv" hidden>
-    <h2>Bağlandı ✓</h2>
     <p id="recvStatus" class="muted">Gönderen telefonda dosyaları seçip “Gönder”e bas.</p>
     <progress id="recvProg" value="0" max="1" hidden></progress>
     <button id="btnSave" disabled>Fotoğraflar'a kaydet</button>
@@ -87,21 +99,38 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
 const SECTIONS = ['home', 'pair', 'send', 'recv'];
-const show = (id) => SECTIONS.forEach((s) => ($(s).hidden = s !== id));
+function show(id) {
+  SECTIONS.forEach((s) => ($(s).hidden = s !== id));
+  $('conn').hidden = id !== 'send' && id !== 'recv';
+}
 const fmt = (b) => b < 1024 ? b + ' B' : b < 1 << 20 ? (b / 1024).toFixed(0) + ' KB' : b < 1 << 30 ? (b / 1048576).toFixed(1) + ' MB' : (b / 1073741824).toFixed(2) + ' GB';
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const logErr = (e) => { console.error(e); $('log').textContent = '⚠️ ' + (e && e.message ? e.message : e); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const STOPPED = new Error('durduruldu'); // Vazgeç'e basılınca yarıda kalan eşleşme sessizce biter
 
 const MIME = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', heic: 'image/heic', heif: 'image/heif', webp: 'image/webp', gif: 'image/gif',
   dng: 'image/x-adobe-dng', mp4: 'video/mp4', m4v: 'video/x-m4v', mov: 'video/quicktime', '3gp': 'video/3gpp', webm: 'video/webm', mkv: 'video/x-matroska' };
 const guessMime = (name) => MIME[(name.split('.').pop() || '').toLowerCase()] || 'application/octet-stream';
 
+let role = null;                 // 'send' | 'recv'
+let pc = null, dc = null;
+let linkUp = false, everUp = false, gen = 0;
+
 // ───────────────────────── Ekran açık kalsın ─────────────────────────
-let wakeLock = null;
+// Ekran kilitlenirse (özellikle iPhone'da) tarayıcı askıya alınır ve bağlantı kopar.
+// Kilit, sayfa arka plana gidince sistem tarafından bırakılır; geri gelince ve her dokunuşta yeniden istenir.
+let wakeLock = null, wakeBusy = false;
 async function keepAwake() {
-  try { if ('wakeLock' in navigator && document.visibilityState === 'visible') wakeLock = await navigator.wakeLock.request('screen'); } catch (_) {}
+  if (!role || wakeBusy || document.visibilityState !== 'visible' || (wakeLock && !wakeLock.released)) return;
+  if (!('wakeLock' in navigator)) { $('awakeInfo').hidden = false; return; }
+  wakeBusy = true;
+  try { wakeLock = await navigator.wakeLock.request('screen'); $('awakeInfo').hidden = true; }
+  catch (_) { $('awakeInfo').hidden = false; }
+  finally { wakeBusy = false; }
 }
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && pc) keepAwake(); });
+document.addEventListener('visibilitychange', keepAwake);
+document.addEventListener('pointerdown', keepAwake, { passive: true });
 
 // ───────────────────────── SDP <-> QR metni ─────────────────────────
 // SDP sıkıştırılıp base64 yapılır. Önek: A1:o: (teklif) / A1:a: (cevap)
@@ -129,9 +158,12 @@ function renderQr(text) {
 // Not: Kamera izni açıkken tarayıcılar gerçek yerel IP adreslerini WebRTC'ye veriyor (yoksa .local mDNS adları
 // kullanılıyor ve bazı ağlarda bağlantı kurulamıyor). Bu yüzden kamera, bağlantı açılana kadar açık tutuluyor.
 let camStream = null, scanning = false;
-async function startCam() {
-  camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 1280 } }, audio: false });
-  $('cam').srcObject = camStream; await $('cam').play().catch(() => {});
+async function startCam(my) {
+  let s;
+  try { s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 1280 } }, audio: false }); }
+  catch (_) { throw new Error('Kamera açılamadı. Tarayıcıya kamera izni ver (QR okutmak için gerekli) ve kamerayı kullanan başka uygulama varsa kapat.'); }
+  if (my !== gen) { s.getTracks().forEach((t) => t.stop()); throw STOPPED; }
+  camStream = s; $('cam').srcObject = s; await $('cam').play().catch(() => {});
 }
 function stopCam() { scanning = false; if (camStream) camStream.getTracks().forEach((t) => t.stop()); camStream = null; $('camBox').hidden = true; }
 function scanFor(prefix) {
@@ -139,7 +171,7 @@ function scanFor(prefix) {
   const v = $('cam'), c = document.createElement('canvas'), ctx = c.getContext('2d', { willReadFrequently: true });
   return new Promise((resolve, reject) => {
     const tick = () => {
-      if (!scanning) return reject(new Error('Tarama durduruldu'));
+      if (!scanning) return reject(STOPPED);
       if (v.readyState >= 2 && v.videoWidth) {
         const k = Math.min(1, 900 / Math.max(v.videoWidth, v.videoHeight));
         c.width = Math.round(v.videoWidth * k); c.height = Math.round(v.videoHeight * k);
@@ -154,21 +186,32 @@ function scanFor(prefix) {
 }
 
 // ───────────────────────── WebRTC ─────────────────────────
-let pc = null, dc = null;
+function closePc() {
+  const old = pc; pc = null; dc = null;
+  if (old) { try { old.close(); } catch (_) {} }
+}
 function newPc() {
-  pc = new RTCPeerConnection({ iceServers: [] }); // STUN/TURN yok: sadece yerel ağ
-  pc.onconnectionstatechange = () => {
-    const s = pc.connectionState;
-    if (s === 'failed') logErr('Bağlantı kurulamadı. İki telefon aynı ağda mı? (Misafir ağları cihazları birbirinden yalıtabilir; hotspot dene.)');
-    if (s === 'disconnected' || s === 'closed') $('log').textContent = '⚠️ Bağlantı koptu.';
+  closePc();
+  const me = new RTCPeerConnection({ iceServers: [] }); // STUN/TURN yok: sadece yerel ağ
+  pc = me;
+  me.onconnectionstatechange = () => {
+    if (pc !== me) return;
+    const s = me.connectionState;
+    if (!linkUp) {
+      if (s === 'failed') logErr('Bağlantı kurulamadı. İki telefon aynı ağda mı? (Misafir ağları cihazları birbirinden yalıtabilir; hotspot dene.)');
+      return;
+    }
+    if (s === 'connected') setConn('up');
+    else if (s === 'disconnected') setConn('weak');
+    else if (s === 'failed' || s === 'closed') lost();
   };
-  return pc;
+  return me;
 }
 function waitIce() {
   return new Promise((res) => {
     if (pc.iceGatheringState === 'complete') return res();
-    const t = setTimeout(res, 4000);
-    pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') { clearTimeout(t); res(); } });
+    const me = pc, t = setTimeout(res, 4000);
+    me.addEventListener('icegatheringstatechange', () => { if (me.iceGatheringState === 'complete') { clearTimeout(t); res(); } });
   });
 }
 const waitOpen = (ch) => new Promise((res, rej) => { if (ch.readyState === 'open') return res(); ch.onopen = () => res(); ch.onerror = (e) => rej(e.error || e); });
@@ -177,11 +220,12 @@ const waitOpen = (ch) => new Promise((res, rej) => { if (ch.readyState === 'open
 async function createOffer() {
   newPc();
   dc = pc.createDataChannel('aktar', { ordered: true });
+  dc.onmessage = onSenderMsg; // alanın ilk mesajı ("elimde olanlar") kaçmasın diye hemen bağlanıyor
   await pc.setLocalDescription(await pc.createOffer());
   await waitIce();
   return 'A1:o:' + await pack(pc.localDescription.sdp);
 }
-async function acceptAnswer(b64) { await pc.setRemoteDescription({ type: 'answer', sdp: await unpack(b64) }); await waitOpen(dc); }
+async function acceptAnswer(b64) { const ch = dc; await pc.setRemoteDescription({ type: 'answer', sdp: await unpack(b64) }); await waitOpen(ch); }
 
 // Alan: teklifi okur, cevap üretir
 async function createAnswer(b64) {
@@ -193,113 +237,229 @@ async function createAnswer(b64) {
   return { code: 'A1:a:' + await pack(pc.localDescription.sdp), channel: gotDc };
 }
 
+// ───────────────────────── Bağlantı durumu ─────────────────────────
+function linkReady() {
+  linkUp = true; everUp = true;
+  const ch = dc;
+  ch.onclose = () => { if (dc === ch) lost(); };
+  setConn('up'); keepAwake();
+}
+function setConn(st) {
+  $('connTitle').textContent = st === 'up' ? 'Bağlandı ✓' : st === 'weak' ? 'Bağlantı zayıf…' : 'Bağlantı koptu ✗';
+  $('connMsg').hidden = st === 'up';
+  $('connMsg').textContent = st === 'weak'
+    ? 'Telefonlar birbirine ulaşamıyor, bekleniyor. İki telefonda da bu sayfa ve ekran açık kalsın.'
+    : 'Genelde telefonlardan birinin ekranı kilitlenince ya da başka uygulamaya geçilince olur. İki telefonda da “Yeniden bağlan”a basıp QR’ları tekrar okut. Gelen dosyalar kaybolmaz, kalanlar kaldığı yerden gönderilir.';
+  $('btnReconnect').hidden = st !== 'lost';
+  if (role === 'send') renderSend();
+}
+function lost() {
+  if (!linkUp) return;
+  linkUp = false; closePc(); setConn('lost');
+  if (role === 'send') senderLost(); else receiverLost();
+}
+
 // ───────────────────────── Eşleşme ekranları ─────────────────────────
 async function startSender() {
-  show('pair'); keepAwake();
-  $('pairTitle').textContent = 'Gönderen';
+  const my = ++gen, live = () => { if (my !== gen) throw STOPPED; };
+  role = 'send'; $('log').textContent = ''; show('pair'); keepAwake();
+  $('pairTitle').textContent = 'Gönderen'; $('pairHint').textContent = ''; $('qrBox').hidden = true;
   $('pairStatus').textContent = 'Kamera açılıyor…';
-  await startCam();
+  await startCam(my); live();
   $('pairStatus').textContent = 'Bağlantı kodu hazırlanıyor…';
-  renderQr(await createOffer());
-  $('pairHint').textContent = '1) Diğer telefonda “Al”a bas ve bu QR’ı okut. 2) Sonra onun ekranında çıkan QR’ı bu telefonun kamerasına (aşağıda) göster.';
+  const offer = await createOffer(); live();
+  renderQr(offer);
+  $('pairHint').textContent = '1) Diğer telefonda “Al”a (ya da “Yeniden bağlan”a) bas ve bu QR’ı okut. 2) Sonra onun ekranında çıkan QR’ı bu telefonun kamerasına (aşağıda) göster.';
   $('pairStatus').textContent = 'Cevap QR’ı bekleniyor…';
-  const ans = await scanFor('A1:a:');
+  const ans = await scanFor('A1:a:'); live();
   $('qrBox').hidden = true; $('pairStatus').textContent = 'Bağlanıyor…';
-  await acceptAnswer(ans);
-  stopCam(); setupSender(); show('send');
+  await acceptAnswer(ans); live();
+  stopCam(); linkReady(); setupSender(); show('send');
 }
 async function startReceiver() {
-  show('pair'); keepAwake(); await recvInit();
-  $('pairTitle').textContent = 'Alan';
+  const my = ++gen, live = () => { if (my !== gen) throw STOPPED; };
+  role = 'recv'; $('log').textContent = ''; show('pair'); keepAwake();
+  await recvInit(); live();
+  $('pairTitle').textContent = 'Alan'; $('qrBox').hidden = true;
   $('pairHint').textContent = 'Gönderen telefonun ekranındaki QR’ı okut.';
   $('pairStatus').textContent = 'Kamera açılıyor…';
-  await startCam();
+  await startCam(my); live();
   $('pairStatus').textContent = 'QR bekleniyor…';
-  const offer = await scanFor('A1:o:');
+  const offer = await scanFor('A1:o:'); live();
   $('pairStatus').textContent = 'Cevap hazırlanıyor…';
-  const { code, channel } = await createAnswer(offer);
+  const { code, channel } = await createAnswer(offer); live();
   renderQr(code);
   $('pairHint').textContent = 'Şimdi bu QR’ı gönderen telefonun kamerasına göster.';
   $('pairStatus').textContent = 'Bağlantı bekleniyor…';
-  dc = await channel; await waitOpen(dc);
-  stopCam(); $('qrBox').hidden = true; setupReceiver(); show('recv');
+  const ch = await channel; live();
+  await waitOpen(ch); live();
+  dc = ch; stopCam(); $('qrBox').hidden = true; linkReady(); setupReceiver(); show('recv');
 }
 
 // ───────────────────────── Gönderme ─────────────────────────
-let picked = [];
-function setupSender() {
-  $('files').onchange = () => {
-    picked = Array.from($('files').files || []);
-    const total = picked.reduce((a, f) => a + f.size, 0);
-    $('sendSummary').textContent = picked.length ? `${picked.length} dosya, toplam ${fmt(total)}` : '';
-    $('btnStart').disabled = !picked.length;
-    $('sendList').innerHTML = picked.map((f, i) => `<li id="s${i}"><span class="n">${esc(f.name)}</span><span class="s">${fmt(f.size)}</span></li>`).join('');
-  };
-  $('btnStart').onclick = () => sendAll(picked).catch(logErr);
-  dc.onmessage = (e) => {
-    const m = JSON.parse(e.data);
-    if (m.t === 'ack') { const li = $('s' + m.i); if (li) { li.classList.add('ok'); li.querySelector('.s').textContent = '✓ alındı'; } acked++; updateAckStatus(); }
-  };
-}
-let acked = 0, sendCount = 0;
-function updateAckStatus() { if (sendCount && acked >= sendCount) $('sendStatus').textContent = `Tamamlandı ✓ ${sendCount} dosya karşı tarafta.`; }
-const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+// Her dosyanın bu oturuma özel bir kimliği var; bağlantı koparsa alan taraf elindekileri bildirir,
+// yeniden bağlanınca sadece eksikler gönderilir.
+const SID = Math.random().toString(36).slice(2, 7);
+const queue = []; // {id, file, st: wait | busy | sent | ok | bad}
+let nextNo = 1, sending = false, probing = 0;
 
-async function sendAll(files) {
-  $('btnStart').disabled = true; $('pickLbl').hidden = true;
-  acked = 0; sendCount = files.length;
-  const CHUNK = 64 * 1024, READ = 4 << 20, HIGH = 8 << 20;
-  dc.bufferedAmountLowThreshold = 1 << 20;
-  const drain = () => new Promise((res) => {
-    if (dc.bufferedAmount <= dc.bufferedAmountLowThreshold) return res();
-    dc.addEventListener('bufferedamountlow', res, { once: true });
-  });
-  const total = files.reduce((a, f) => a + f.size, 0);
-  let sent = 0; const t0 = performance.now();
-  const prog = $('sendProg'); prog.hidden = false; prog.max = total || 1;
-  dc.send(JSON.stringify({ t: 'batch', count: files.length, total }));
-  for (let i = 0; i < files.length; i++) {
-    const f = files[i];
-    if (dc.readyState !== 'open') throw new Error('Bağlantı koptu, gönderim yarıda kaldı.');
-    dc.send(JSON.stringify({ t: 'file', i, name: f.name, size: f.size, type: f.type || guessMime(f.name), lm: f.lastModified }));
-    for (let off = 0; off < f.size; off += READ) {
-      const buf = await f.slice(off, off + READ).arrayBuffer();
-      for (let p = 0; p < buf.byteLength; p += CHUNK) {
-        if (dc.bufferedAmount > HIGH) await drain();
-        if (dc.readyState !== 'open') throw new Error('Bağlantı koptu, gönderim yarıda kaldı.');
-        dc.send(buf.slice(p, p + CHUNK));
-      }
-      sent += buf.byteLength; prog.value = sent;
-      const sec = (performance.now() - t0) / 1000;
-      $('sendStatus').textContent = `${i + 1}/${files.length} · ${fmt(sent)} / ${fmt(total)} · ${fmt(sent / Math.max(sec, 0.1))}/s`;
-    }
-    dc.send(JSON.stringify({ t: 'end', i }));
+function setupSender() {
+  if (!setupSender.done) {
+    setupSender.done = true;
+    $('files').onchange = () => addFiles($('files'));
+    $('files2').onchange = () => addFiles($('files2'));
+    $('btnStart').onclick = () => sendAll().catch(logErr);
   }
-  dc.send(JSON.stringify({ t: 'done' }));
-  await drain();
-  if (acked < sendCount) $('sendStatus').textContent += ' · karşı tarafın kaydetmesi bekleniyor…';
-  updateAckStatus();
+  renderSend(); updateSendStatus();
+}
+
+// Dosya gerçekten okunabiliyor mu? Android'de galeriden seçilen bazı videolar seçilebiliyor ama okunamıyor.
+async function canRead(f) {
+  try {
+    const n = Math.min(f.size, 64 * 1024);
+    await f.slice(0, n).arrayBuffer();
+    if (f.size > n) await f.slice(f.size - n).arrayBuffer();
+    return true;
+  } catch (_) { return false; }
+}
+async function addFiles(input) {
+  const fresh = Array.from(input.files || []).map((file) => ({ id: `${SID}-${nextNo++}`, file, st: 'wait' }));
+  input.value = ''; // aynı dosya tekrar seçilebilsin
+  if (!fresh.length) return;
+  queue.push(...fresh); probing++; renderSend();
+  try {
+    for (const q of fresh) {
+      if (!(await canRead(q.file)) && q.st === 'wait') { q.st = 'bad'; $('readHelp').hidden = false; }
+    }
+  } finally { probing--; renderSend(); updateSendStatus(); }
+}
+
+const SEND_LABEL = { wait: (q) => fmt(q.file.size), busy: () => 'gönderiliyor…', sent: () => 'onay bekleniyor…', ok: () => '✓ alındı', bad: () => '✗ okunamadı' };
+function renderSend() {
+  const wait = queue.filter((q) => q.st === 'wait');
+  const total = wait.reduce((a, q) => a + q.file.size, 0);
+  $('sendSummary').textContent = probing ? 'Dosyalar kontrol ediliyor…' : wait.length ? `Gönderilecek: ${wait.length} dosya, toplam ${fmt(total)}` : '';
+  const b = $('btnStart');
+  b.disabled = sending || probing > 0 || !linkUp || !wait.length;
+  b.textContent = sending ? 'Gönderiliyor…' : wait.length ? `Gönder (${wait.length})` : 'Gönder';
+  $('pickLbl').hidden = sending; $('pickLbl2').hidden = sending;
+  $('pickTxt').textContent = queue.length ? 'Başka fotoğraf / video seç' : 'Fotoğraf / video seç';
+  $('sendList').innerHTML = queue.map((q) => `<li class="${q.st}"><span class="n">${esc(q.file.name)}</span><span class="s">${SEND_LABEL[q.st](q)}</span></li>`).join('');
+}
+function updateSendStatus() {
+  if (sending) return;
+  const c = (st) => queue.filter((q) => q.st === st).length;
+  const parts = [];
+  if (c('ok')) parts.push(`${c('ok')} dosya karşı tarafta ✓`);
+  if (c('sent')) parts.push(`${c('sent')} dosya için onay bekleniyor`);
+  if (c('wait') && (c('ok') || c('bad'))) parts.push(`${c('wait')} dosya gönderilmedi`);
+  if (c('bad')) parts.push(`${c('bad')} dosya okunamadı`);
+  $('sendStatus').textContent = parts.join(' · ');
+}
+function markOk(id) {
+  const q = queue.find((x) => x.id === id);
+  if (q && q.st !== 'ok' && q.st !== 'bad') { q.st = 'ok'; renderSend(); updateSendStatus(); }
+}
+function onSenderMsg(e) {
+  if (typeof e.data !== 'string') return;
+  let m; try { m = JSON.parse(e.data); } catch (_) { return; }
+  if (m.t === 'ack') markOk(m.i);
+  else if (m.t === 'have' && Array.isArray(m.ids)) m.ids.forEach(markOk);
+}
+function senderLost() {
+  queue.forEach((q) => { if (q.st === 'busy' || q.st === 'sent') q.st = 'wait'; });
+  $('sendProg').hidden = true; renderSend(); updateSendStatus();
+}
+
+async function sendAll() {
+  const ch = dc;
+  const list = queue.filter((q) => q.st === 'wait');
+  if (!ch || ch.readyState !== 'open' || !list.length || sending) return;
+  sending = true; $('log').textContent = ''; renderSend();
+  const CHUNK = 64 * 1024, READ = 4 << 20, HIGH = 8 << 20;
+  const alive = () => ch.readyState === 'open' && dc === ch;
+  ch.bufferedAmountLowThreshold = 1 << 20;
+  const drain = () => new Promise((res) => {
+    if (ch.bufferedAmount <= ch.bufferedAmountLowThreshold) return res();
+    const done = () => { clearInterval(iv); ch.removeEventListener('bufferedamountlow', done); res(); };
+    const iv = setInterval(() => { if (!alive()) done(); }, 500); // bağlantı koparsa beklemede kalmasın
+    ch.addEventListener('bufferedamountlow', done);
+  });
+  const total = list.reduce((a, q) => a + q.file.size, 0);
+  let sent = 0; const t0 = performance.now();
+  const prog = $('sendProg'); prog.hidden = false; prog.max = total || 1; prog.value = 0;
+  const LOST = new Error('koptu');
+  try {
+    ch.send(JSON.stringify({ t: 'batch', count: list.length, total }));
+    for (let k = 0; k < list.length; k++) {
+      const q = list[k], f = q.file;
+      if (!alive()) throw LOST;
+      if (q.st !== 'wait') { sent += f.size; continue; } // bu arada karşı tarafta olduğu anlaşıldıysa
+      q.st = 'busy'; renderSend();
+      ch.send(JSON.stringify({ t: 'file', i: q.id, name: f.name, size: f.size, type: f.type || guessMime(f.name), lm: f.lastModified }));
+      let off = 0, readFailed = false;
+      for (; off < f.size; off += READ) {
+        let buf;
+        try { buf = await f.slice(off, off + READ).arrayBuffer(); } catch (_) { readFailed = true; break; }
+        for (let p = 0; p < buf.byteLength; p += CHUNK) {
+          if (ch.bufferedAmount > HIGH) await drain();
+          if (!alive()) throw LOST;
+          ch.send(buf.slice(p, p + CHUNK));
+        }
+        sent += buf.byteLength; prog.value = sent;
+        const sec = (performance.now() - t0) / 1000;
+        $('sendStatus').textContent = `${k + 1}/${list.length} · ${fmt(sent)} / ${fmt(total)} · ${fmt(sent / Math.max(sec, 0.1))}/s`;
+      }
+      if (!alive()) throw LOST;
+      if (readFailed) {
+        // Bu dosya okunamadı: alan taraf yarım dosyayı silsin, sıradakiyle devam edilsin
+        ch.send(JSON.stringify({ t: 'abort', i: q.id }));
+        q.st = 'bad'; $('readHelp').hidden = false; sent += f.size - off; prog.value = sent; renderSend();
+        continue;
+      }
+      ch.send(JSON.stringify({ t: 'end', i: q.id }));
+      q.st = 'sent'; renderSend();
+    }
+    ch.send(JSON.stringify({ t: 'done' }));
+    await drain();
+  } catch (e) {
+    if (e !== LOST && alive()) logErr(e);
+    list.forEach((q) => { if (q.st === 'busy') q.st = 'wait'; });
+  } finally {
+    sending = false; prog.hidden = true; renderSend(); updateSendStatus();
+  }
 }
 
 // ───────────────────────── Alma (OPFS'e diske yazma) ─────────────────────────
 // Büyük videolar RAM'e alınmasın diye parçalar bir Worker içinde OPFS'e (tarayıcının özel dosya alanı) yazılıyor.
+// Yazılmakta olan dosyanın adı ".partial" içinde tutulur: aktarım yarıda kalırsa o yarım dosya silinir.
 const WORKER_SRC = `
 let h = null, pos = 0, q = Promise.resolve();
-async function handle(m) {
-  if (m.op === 'probe') { const r = await navigator.storage.getDirectory(); const fh = await r.getFileHandle('.probe', { create: true });
-    const x = await fh.createSyncAccessHandle(); x.close(); await r.removeEntry('.probe'); postMessage({ op: 'probe', ok: true }); return; }
-  if (m.op === 'open') { const r = await navigator.storage.getDirectory(); const fh = await r.getFileHandle(m.name, { create: true });
-    h = await fh.createSyncAccessHandle(); h.truncate(0); pos = 0; return; }
-  if (m.op === 'write') { const u = new Uint8Array(m.buf); let w = 0; while (w < u.length) w += h.write(u.subarray(w), { at: pos + w }); pos += u.length; return; }
-  if (m.op === 'close') { h.flush(); h.close(); h = null; postMessage({ op: 'closed', id: m.id, name: m.name }); return; }
+const dir = () => navigator.storage.getDirectory();
+async function mark(r, name) {
+  const x = await (await r.getFileHandle('.partial', { create: true })).createSyncAccessHandle();
+  const b = new TextEncoder().encode(name); x.truncate(0); x.write(b, { at: 0 }); x.flush(); x.close();
 }
-onmessage = (e) => { q = q.then(() => handle(e.data)).catch((err) => postMessage({ op: 'error', msg: String(err && err.message || err), probe: e.data.op === 'probe' })); };
+async function handle(m) {
+  if (m.op === 'probe') { const r = await dir(); const fh = await r.getFileHandle('.probe', { create: true });
+    const x = await fh.createSyncAccessHandle(); x.close(); await r.removeEntry('.probe'); postMessage({ op: 'probe', ok: true }); return; }
+  if (m.op === 'open') { if (h) { h.close(); h = null; } const r = await dir(); await mark(r, m.name);
+    const fh = await r.getFileHandle(m.name, { create: true }); h = await fh.createSyncAccessHandle(); h.truncate(0); pos = 0; return; }
+  if (m.op === 'write') { if (!h) return; const u = new Uint8Array(m.buf); let w = 0; while (w < u.length) w += h.write(u.subarray(w), { at: pos + w }); pos += u.length; return; }
+  if (m.op === 'close') { if (!h) return; h.flush(); h.close(); h = null; const r = await dir(); await r.removeEntry('.partial').catch(() => {});
+    postMessage({ op: 'closed', id: m.id, name: m.name }); return; }
+  if (m.op === 'abort') { if (h) { h.close(); h = null; } const r = await dir(); await r.removeEntry(m.name).catch(() => {});
+    await r.removeEntry('.partial').catch(() => {}); return; }
+}
+onmessage = (e) => { q = q.then(() => handle(e.data)).catch((err) => postMessage({ op: 'error', name: err && err.name, msg: String(err && err.message || err), probe: e.data.op === 'probe' })); };
 `;
-let worker = null, useOpfs = false, root = null;
-const received = []; // {name, file, saved}
+let worker = null, useOpfs = false, root = null, inited = false;
+const received = []; // {key, id, file, saved}
 let seq = Date.now();
 
 async function recvInit() {
+  if (inited) return;
+  inited = true;
   try {
     root = await navigator.storage.getDirectory();
     worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' })));
@@ -309,66 +469,97 @@ async function recvInit() {
       worker.postMessage({ op: 'probe' });
     });
   } catch (_) { useOpfs = false; }
-  if (useOpfs) {
-    // Önceki oturumdan kalan (kaydedilmemiş) dosyaları da listele — sayfa çökse bile kaybolmasın
-    for await (const [n, hnd] of root.entries()) {
-      if (hnd.kind !== 'file' || n.startsWith('.')) continue;
-      const f = await hnd.getFile(); if (!f.size) { await root.removeEntry(n); continue; }
-      const orig = n.replace(/^\d+_\d+__/, '');
-      received.push({ key: n, file: new File([f], orig, { type: guessMime(orig), lastModified: f.lastModified }), saved: false });
-    }
-    received.sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }));
+  if (!useOpfs) return;
+  worker.onmessage = onWorkerMsg;
+  // Aktarım ortasında sayfa kapandıysa yarım kalan dosyayı sil
+  try {
+    const name = await (await (await root.getFileHandle('.partial')).getFile()).text();
+    if (name) await root.removeEntry(name).catch(() => {});
+    await root.removeEntry('.partial');
+  } catch (_) {}
+  // Önceki oturumdan kalan (kaydedilmemiş) dosyaları da listele — sayfa çökse bile kaybolmasın
+  const empty = [];
+  for await (const [n, hnd] of root.entries()) {
+    if (hnd.kind !== 'file' || n.startsWith('.')) continue;
+    const f = await hnd.getFile(); if (!f.size) { empty.push(n); continue; }
+    const m = n.match(/^\d+_([^_]*)__(.*)$/);
+    const orig = m ? m[2] : n;
+    received.push({ key: n, id: m ? m[1] : '', file: new File([f], orig, { type: guessMime(orig), lastModified: f.lastModified }), saved: false });
   }
+  for (const n of empty) await root.removeEntry(n).catch(() => {});
+  received.sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }));
+}
+
+async function onWorkerMsg(e) {
+  const m = e.data;
+  if (m.op === 'error') return logErr(m.name === 'QuotaExceededError' ? 'Telefonda yer kalmadı. Kaydettiklerini “Kaydedilenleri sil” ile silip yer aç.' : 'Kayıt hatası: ' + m.msg);
+  if (m.op === 'closed') {
+    const f = await (await root.getFileHandle(m.name)).getFile();
+    finishFile(m.id, m.name, f);
+  }
+}
+
+const meta = {}; // id -> {name, type, lm}
+let cur = null, batch = null, gotTotal = 0, batchNo = 0;
+function finishFile(id, key, blob) {
+  const md = meta[id] || { name: key, type: guessMime(key), lm: Date.now() };
+  delete meta[id];
+  received.push({ key, id, file: new File([blob], md.name, { type: md.type, lastModified: md.lm }), saved: false });
+  if (dc && dc.readyState === 'open') dc.send(JSON.stringify({ t: 'ack', i: id }));
+  renderRecv();
+}
+function onRecvMsg(e) {
+  const prog = $('recvProg');
+  if (typeof e.data === 'string') {
+    const m = JSON.parse(e.data);
+    if (m.t === 'batch') { batch = m; gotTotal = 0; batchNo = 0; prog.hidden = false; prog.max = m.total || 1; prog.value = 0; }
+    else if (m.t === 'file') {
+      if (cur && useOpfs) worker.postMessage({ op: 'abort', name: cur.key });
+      const key = `${seq++}_${String(m.i).replace(/[^a-z0-9-]/gi, '')}__${m.name.replace(/[\\/:*?"<>|]/g, '_')}`;
+      meta[m.i] = { name: m.name, type: m.type || guessMime(m.name), lm: m.lm };
+      cur = { i: m.i, key, chunks: [] }; batchNo++;
+      if (useOpfs) worker.postMessage({ op: 'open', name: key });
+    } else if (m.t === 'end') {
+      if (!cur) return;
+      if (useOpfs) worker.postMessage({ op: 'close', id: cur.i, name: cur.key });
+      else finishFile(cur.i, cur.key, new Blob(cur.chunks));
+      cur = null;
+    } else if (m.t === 'abort') {
+      // Gönderen bu dosyayı okuyamadı: yarım parçayı at
+      if (cur) { if (useOpfs) worker.postMessage({ op: 'abort', name: cur.key }); delete meta[cur.i]; cur = null; }
+    } else if (m.t === 'done') {
+      prog.hidden = true;
+      $('recvStatus').textContent = `Aktarım bitti. Şimdi “Fotoğraflar'a kaydet”e bas.`;
+    }
+    return;
+  }
+  // ikili parça
+  const buf = e.data, len = buf.byteLength; // Worker'a aktarılınca buf boşalır, boyutu önce al
+  if (!cur) return;
+  if (useOpfs) worker.postMessage({ op: 'write', buf }, [buf]); else cur.chunks.push(buf);
+  gotTotal += len; prog.value = gotTotal;
+  $('recvStatus').textContent = `Alınıyor ${batch ? batchNo + '/' + batch.count : ''} · ${fmt(gotTotal)}${batch ? ' / ' + fmt(batch.total) : ''}`;
 }
 
 function setupReceiver() {
   dc.binaryType = 'arraybuffer';
-  let cur = null, batch = null, gotTotal = 0;
-  const prog = $('recvProg');
-  if (useOpfs) worker.onmessage = async (e) => {
-    const m = e.data;
-    if (m.op === 'error') return logErr('Kayıt hatası: ' + m.msg);
-    if (m.op === 'closed') {
-      const fh = await root.getFileHandle(m.name); const f = await fh.getFile();
-      finishFile(m.id, m.name, f);
-    }
-  };
-  const meta = {};
-  function finishFile(id, key, blob) {
-    const md = meta[id];
-    const file = new File([blob], md.name, { type: md.type, lastModified: md.lm });
-    received.push({ key, file, saved: false });
-    dc.send(JSON.stringify({ t: 'ack', i: id }));
-    renderRecv();
+  dc.onmessage = onRecvMsg;
+  cur = null; batch = null;
+  if (!setupReceiver.done) {
+    setupReceiver.done = true;
+    $('btnSave').onclick = saveNext;
+    $('btnClear').onclick = clearSaved;
   }
-  dc.onmessage = (e) => {
-    if (typeof e.data === 'string') {
-      const m = JSON.parse(e.data);
-      if (m.t === 'batch') { batch = m; gotTotal = 0; prog.hidden = false; prog.max = m.total || 1; prog.value = 0; }
-      else if (m.t === 'file') {
-        const key = `${seq++}_${m.i}__${m.name.replace(/[\\/:*?"<>|]/g, '_')}`;
-        meta[m.i] = { name: m.name, type: m.type || guessMime(m.name), lm: m.lm };
-        cur = { i: m.i, key, size: m.size, got: 0, chunks: [] };
-        if (useOpfs) worker.postMessage({ op: 'open', name: key });
-      } else if (m.t === 'end') {
-        if (useOpfs) worker.postMessage({ op: 'close', id: cur.i, name: cur.key });
-        else finishFile(cur.i, cur.key, new Blob(cur.chunks));
-        cur = null;
-      } else if (m.t === 'done') {
-        $('recvStatus').textContent = `Aktarım bitti: ${batch ? batch.count : ''} dosya. Şimdi “Fotoğraflar'a kaydet”e bas.`;
-      }
-      return;
-    }
-    // ikili parça
-    const buf = e.data;
-    if (!cur) return;
-    if (useOpfs) worker.postMessage({ op: 'write', buf }, [buf]); else cur.chunks.push(buf);
-    cur.got += buf.byteLength; gotTotal += buf.byteLength; prog.value = gotTotal;
-    $('recvStatus').textContent = `Alınıyor ${(batch ? Object.keys(meta).length + '/' + batch.count : '')} · ${fmt(gotTotal)}${batch ? ' / ' + fmt(batch.total) : ''}`;
-  };
-  $('btnSave').onclick = saveNext;
-  $('btnClear').onclick = clearSaved;
+  $('recvProg').hidden = true;
+  $('recvStatus').textContent = 'Gönderen telefonda dosyaları seçip “Gönder”e bas.';
+  // Elimizdekileri bildir: bağlantı koptuysa gönderen bunları tekrar yollamaz
+  dc.send(JSON.stringify({ t: 'have', ids: received.map((r) => r.id).filter(Boolean) }));
   renderRecv();
+}
+function receiverLost() {
+  if (cur) { if (useOpfs) worker.postMessage({ op: 'abort', name: cur.key }); delete meta[cur.i]; cur = null; }
+  $('recvProg').hidden = true;
+  $('recvStatus').textContent = received.some((r) => !r.saved) ? 'Gelen dosyalar duruyor, bağlantı olmadan da kaydedebilirsin.' : '';
 }
 
 function renderRecv() {
@@ -405,14 +596,21 @@ async function clearSaved() {
 }
 
 // ───────────────────────── Başlat ─────────────────────────
-$('btnSend').onclick = () => startSender().catch((e) => { stopCam(); logErr(e); });
-$('btnRecv').onclick = () => startReceiver().catch((e) => { stopCam(); logErr(e); });
-$('btnCancel').onclick = () => location.reload();
+const pairFail = (e) => { if (e === STOPPED) return; stopCam(); logErr(e); };
+$('btnSend').onclick = () => startSender().catch(pairFail);
+$('btnRecv').onclick = () => startReceiver().catch(pairFail);
+$('btnReconnect').onclick = () => (role === 'send' ? startSender() : startReceiver()).catch(pairFail);
+$('btnCancel').onclick = () => {
+  if (!everUp) return location.reload();
+  // Yeniden bağlanırken vazgeçildi: dosyalar dursun, bağlantı ekranına dön
+  gen++; stopCam(); closePc(); $('qrBox').hidden = true; linkUp = false; setConn('lost'); show(role);
+};
 if (!window.RTCPeerConnection || !window.CompressionStream) $('homeInfo').textContent = 'Bu tarayıcı desteklenmiyor (güncel Chrome / Safari gerekli).';
 if (!window.isSecureContext) $('homeInfo').textContent = 'Kamera için sayfa HTTPS üzerinden açılmalı.';
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 // Test için dışarı açılan fonksiyonlar
-window.__aktar = { createOffer, acceptAnswer, createAnswer, setupSender, setupReceiver, recvInit, sendAll, get dc() { return dc; }, set dc(v) { dc = v; }, received };
+window.__aktar = { createOffer, acceptAnswer, createAnswer, waitOpen, linkReady, setupSender, setupReceiver, recvInit, addFiles, sendAll, lost, show,
+  queue, received, get dc() { return dc; }, set dc(v) { dc = v; }, get pc() { return pc; }, set role(v) { role = v; }, get linkUp() { return linkUp; } };
 </script>
 </body>
 </html>
