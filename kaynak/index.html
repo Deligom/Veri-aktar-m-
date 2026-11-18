@@ -64,16 +64,16 @@
     <h2 id="connTitle">Bağlandı ✓</h2>
     <p id="connMsg" class="muted" hidden></p>
     <button id="btnReconnect" hidden>🔄 Yeniden bağlan</button>
-    <p class="muted">Aktarım bitene kadar iki telefonda da bu sayfa açık kalsın. Başka uygulamaya geçilirse ya da ekran kilitlenirse bağlantı kopar.</p>
+    <p class="muted">Aktarım bitene kadar iki telefonda da bu sayfa açık kalsın. Başka uygulamaya geçilirse ya da ekran kilitlenirse bağlantı kopar; sayfaya dönünce kendiliğinden yeniden bağlanır.</p>
     <p id="awakeInfo" class="muted warn" hidden>⚠️ Bu tarayıcı ekranı açık tutamıyor. Aktarım bitene kadar ekran kilitlenmesin: ara ara ekrana dokun ya da otomatik kilidi geçici olarak kapat (iPhone: Ayarlar › Ekran ve Parlaklık › Otomatik Kilit).</p>
   </section>
 
   <section id="send" hidden>
     <label class="pick" id="pickLbl"><span id="pickTxt">Fotoğraf / video seç</span><input type="file" id="files" multiple accept="image/*,video/*"></label>
+    <p id="pickHint" class="muted" hidden>Dosya yöneticisi açılır. Kamerayla çekilenler genelde DCIM › Camera klasöründedir; birden fazla dosyayı basılı tutarak seçebilirsin.</p>
     <div id="readHelp" class="card" hidden>
       <p class="warn">⚠️ Bazı dosyalar okunamadı.</p>
-      <p class="muted">Bu genelde Android’de galeriden seçilen videolarda olur. Aynı dosyayı aşağıdaki butonla dosya yöneticisinden seçmeyi dene (Dosyalarım › Videolar ya da DCIM › Camera klasörü).</p>
-      <label class="pick sec" id="pickLbl2">📁 Dosyalar’dan seç<input type="file" id="files2" multiple></label>
+      <p class="muted">Telefon bu dosyaları okumaya izin vermedi ya da dosya taşınmış olabilir. Aynı dosyayı yukarıdaki butonla tekrar seçmeyi dene.</p>
     </div>
     <p id="sendSummary" class="muted"></p>
     <button id="btnStart" disabled>Gönder</button>
@@ -108,6 +108,8 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 const logErr = (e) => { console.error(e); $('log').textContent = '⚠️ ' + (e && e.message ? e.message : e); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const STOPPED = new Error('durduruldu'); // Vazgeç'e basılınca yarıda kalan eşleşme sessizce biter
+const SID = Math.random().toString(36).slice(2, 7); // bu sayfa oturumunun kimliği
+const IS_ANDROID = /Android/i.test(navigator.userAgent);
 
 const MIME = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', heic: 'image/heic', heif: 'image/heif', webp: 'image/webp', gif: 'image/gif',
   dng: 'image/x-adobe-dng', mp4: 'video/mp4', m4v: 'video/x-m4v', mov: 'video/quicktime', '3gp': 'video/3gpp', webm: 'video/webm', mkv: 'video/x-matroska' };
@@ -156,44 +158,72 @@ function renderQr(text) {
 
 // ───────────────────────── Kamera + QR okuma ─────────────────────────
 // Not: Kamera izni açıkken tarayıcılar gerçek yerel IP adreslerini WebRTC'ye veriyor (yoksa .local mDNS adları
-// kullanılıyor ve bazı ağlarda bağlantı kurulamıyor). Bu yüzden kamera, bağlantı açılana kadar açık tutuluyor.
+// kullanılıyor ve bazı ağlarda bağlantı kurulamıyor). Bu yüzden kamera, bağlantı (ve yedekleri) hazır olana kadar açık tutuluyor.
 let camStream = null, scanning = false;
 async function startCam(my) {
   let s;
   try { s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 1280 } }, audio: false }); }
   catch (_) { throw new Error('Kamera açılamadı. Tarayıcıya kamera izni ver (QR okutmak için gerekli) ve kamerayı kullanan başka uygulama varsa kapat.'); }
   if (my !== gen) { s.getTracks().forEach((t) => t.stop()); throw STOPPED; }
-  camStream = s; $('cam').srcObject = s; await $('cam').play().catch(() => {});
+  if (camStream) camStream.getTracks().forEach((t) => t.stop());
+  camStream = s;
+  // Sürekli odaklama (eski Android'lerde ekrandaki QR'a odaklanmayı kolaylaştırır)
+  try {
+    const tr = s.getVideoTracks()[0], caps = tr.getCapabilities ? tr.getCapabilities() : {};
+    if (caps.focusMode && caps.focusMode.includes('continuous')) await tr.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+  } catch (_) {}
+  $('cam').srcObject = s; await $('cam').play().catch(() => {});
 }
 function stopCam() { scanning = false; if (camStream) camStream.getTracks().forEach((t) => t.stop()); camStream = null; $('camBox').hidden = true; }
+
+// Android Chrome'un yerleşik QR okuyucusu (bulanık/odaksız görüntüde jsQR'dan çok daha iyi). Yoksa sadece jsQR.
+let detector;
+async function initDetector() {
+  if (detector !== undefined) return;
+  detector = null;
+  try {
+    if ('BarcodeDetector' in window && (await BarcodeDetector.getSupportedFormats()).includes('qr_code')) detector = new BarcodeDetector({ formats: ['qr_code'] });
+  } catch (_) {}
+}
 function scanFor(prefix) {
   scanning = true; $('camBox').hidden = false;
   const v = $('cam'), c = document.createElement('canvas'), ctx = c.getContext('2d', { willReadFrequently: true });
+  let n = 0;
   return new Promise((resolve, reject) => {
-    const tick = () => {
+    const found = (txt) => {
+      if (!scanning || !txt || !txt.startsWith(prefix)) return false;
+      scanning = false; resolve(txt.slice(prefix.length)); return true;
+    };
+    const tick = async () => {
       if (!scanning) return reject(STOPPED);
-      if (v.readyState >= 2 && v.videoWidth) {
-        const k = Math.min(1, 900 / Math.max(v.videoWidth, v.videoHeight));
-        c.width = Math.round(v.videoWidth * k); c.height = Math.round(v.videoHeight * k);
-        ctx.drawImage(v, 0, 0, c.width, c.height);
-        const r = jsQR(ctx.getImageData(0, 0, c.width, c.height).data, c.width, c.height, { inversionAttempts: 'dontInvert' });
-        if (r && r.data && r.data.startsWith(prefix)) { scanning = false; return resolve(r.data.slice(prefix.length)); }
-      }
+      try {
+        if (v.readyState >= 2 && v.videoWidth) {
+          if (detector && n++ % 2 === 0) { // sırayla: yerleşik okuyucu, jsQR
+            const codes = await detector.detect(v);
+            if (codes.some((x) => found(x.rawValue))) return;
+          } else {
+            const k = Math.min(1, 900 / Math.max(v.videoWidth, v.videoHeight));
+            c.width = Math.round(v.videoWidth * k); c.height = Math.round(v.videoHeight * k);
+            ctx.drawImage(v, 0, 0, c.width, c.height);
+            const r = jsQR(ctx.getImageData(0, 0, c.width, c.height).data, c.width, c.height, { inversionAttempts: 'dontInvert' });
+            if (r && found(r.data)) return;
+          }
+        }
+      } catch (_) {}
       setTimeout(tick, 120);
     };
-    tick();
+    initDetector().then(tick);
   });
 }
 
 // ───────────────────────── WebRTC ─────────────────────────
+const RTC_CONF = { iceServers: [] }; // STUN/TURN yok: sadece yerel ağ
+let weakTimer = null;
 function closePc() {
-  const old = pc; pc = null; dc = null;
+  const old = pc; pc = null; dc = null; clearTimeout(weakTimer);
   if (old) { try { old.close(); } catch (_) {} }
 }
-function newPc() {
-  closePc();
-  const me = new RTCPeerConnection({ iceServers: [] }); // STUN/TURN yok: sadece yerel ağ
-  pc = me;
+function watchPc(me) {
   me.onconnectionstatechange = () => {
     if (pc !== me) return;
     const s = me.connectionState;
@@ -201,17 +231,21 @@ function newPc() {
       if (s === 'failed') logErr('Bağlantı kurulamadı. İki telefon aynı ağda mı? (Misafir ağları cihazları birbirinden yalıtabilir; hotspot dene.)');
       return;
     }
-    if (s === 'connected') setConn('up');
-    else if (s === 'disconnected') setConn('weak');
-    else if (s === 'failed' || s === 'closed') lost();
+    if (s === 'connected') { clearTimeout(weakTimer); setConn('up'); }
+    else if (s === 'disconnected') {
+      setConn('weak');
+      // Telefon askıdan dönünce "failed" bazen geç geliyor: 10 sn toparlanmazsa koptu say, yedekle bağlan
+      clearTimeout(weakTimer);
+      weakTimer = setTimeout(() => { if (pc === me && me.connectionState !== 'connected') lost(); }, 10000);
+    } else if (s === 'failed' || s === 'closed') lost();
   };
-  return me;
 }
-function waitIce() {
+function newPc() { closePc(); const me = new RTCPeerConnection(RTC_CONF); pc = me; watchPc(me); return me; }
+function waitIce(p = pc) {
   return new Promise((res) => {
-    if (pc.iceGatheringState === 'complete') return res();
-    const me = pc, t = setTimeout(res, 4000);
-    me.addEventListener('icegatheringstatechange', () => { if (me.iceGatheringState === 'complete') { clearTimeout(t); res(); } });
+    if (p.iceGatheringState === 'complete') return res();
+    const t = setTimeout(res, 4000);
+    p.addEventListener('icegatheringstatechange', () => { if (p.iceGatheringState === 'complete') { clearTimeout(t); res(); } });
   });
 }
 const waitOpen = (ch) => new Promise((res, rej) => { if (ch.readyState === 'open') return res(); ch.onopen = () => res(); ch.onerror = (e) => rej(e.error || e); });
@@ -220,7 +254,7 @@ const waitOpen = (ch) => new Promise((res, rej) => { if (ch.readyState === 'open
 async function createOffer() {
   newPc();
   dc = pc.createDataChannel('aktar', { ordered: true });
-  dc.onmessage = onSenderMsg; // alanın ilk mesajı ("elimde olanlar") kaçmasın diye hemen bağlanıyor
+  dc.onmessage = onSenderMsg; // alanın ilk mesajları kaçmasın diye hemen bağlanıyor
   await pc.setLocalDescription(await pc.createOffer());
   await waitIce();
   return 'A1:o:' + await pack(pc.localDescription.sdp);
@@ -230,11 +264,116 @@ async function acceptAnswer(b64) { const ch = dc; await pc.setRemoteDescription(
 // Alan: teklifi okur, cevap üretir
 async function createAnswer(b64) {
   newPc();
-  const gotDc = new Promise((res) => (pc.ondatachannel = (e) => res(e.channel)));
+  const gotDc = new Promise((res) => (pc.ondatachannel = (e) => { e.channel.binaryType = 'arraybuffer'; e.channel.onmessage = onRecvMsg; res(e.channel); }));
   await pc.setRemoteDescription({ type: 'offer', sdp: await unpack(b64) });
   await pc.setLocalDescription(await pc.createAnswer());
   await waitIce();
   return { code: 'A1:a:' + await pack(pc.localDescription.sdp), channel: gotDc };
+}
+
+// ───────────────────────── Yedek bağlantılar: QR'sız yeniden bağlanma ─────────────────────────
+// Bağlıyken iki telefon, henüz kullanılmayan yedek bağlantılar için teklif/cevap değiş tokuş eder. Teklif sahibi
+// teklifini uygular ama cevabı bekletir; cevaplayan da cevabını hazırlar ama uygulamaz. Bağlantı kopunca iki taraf
+// da bekleyen yarıyı uygular ve telefonlar QR okutmadan yeniden bağlanır. Askıya alınan telefonun eski ağ
+// bağlantı noktaları ölmüş olabileceği için iki yönde de yedek var; hangisinin kullanılacağına gönderen karar verir.
+const SB_COUNT = 2;
+let sbMine = [], sbTheirs = [], sbLive = [], sbNo = 1;
+
+function dropStandby() {
+  for (const e of [...sbMine, ...sbTheirs, ...sbLive]) { try { e.pc.close(); } catch (_) {} }
+  sbMine = []; sbTheirs = []; sbLive = [];
+}
+function sbChannel(e, ch) {
+  e.ch = ch; ch.binaryType = 'arraybuffer';
+  if (role === 'send') {
+    ch.onmessage = onSenderMsg;
+    const go = () => { if (!linkUp && sbLive.includes(e)) adoptStandby(e); };
+    ch.addEventListener('open', go);
+    if (ch.readyState === 'open') go();
+  } else {
+    ch.onmessage = (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
+      if (m.t === 'use' && !linkUp && sbLive.includes(e)) adoptStandby(e);
+    };
+  }
+}
+// Kamera izni zaten verilmişse yedek hazırlarken kamerayı görünmeden kısa süre aç (gerçek IP adresleri için)
+async function hiddenCam() {
+  try {
+    if (camStream || !navigator.permissions) return null;
+    if ((await navigator.permissions.query({ name: 'camera' })).state !== 'granted') return null;
+    return await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+  } catch (_) { return null; }
+}
+async function prepareStandby(withCam) {
+  const ch = dc;
+  let cam = null;
+  try {
+    if (withCam && sbMine.length < SB_COUNT) cam = await hiddenCam();
+    while (sbMine.length < SB_COUNT && ch && dc === ch && ch.readyState === 'open') {
+      const p = new RTCPeerConnection(RTC_CONF);
+      const e = { id: `${role}-${SID}-${sbNo++}`, pc: p, ch: null, answer: null };
+      sbChannel(e, p.createDataChannel('aktar', { ordered: true }));
+      await p.setLocalDescription(await p.createOffer());
+      await waitIce(p);
+      if (dc !== ch || ch.readyState !== 'open') { p.close(); break; }
+      sbMine.push(e);
+      ch.send(JSON.stringify({ t: 'sb-offer', id: e.id, sdp: p.localDescription.sdp }));
+    }
+  } catch (err) { console.warn('Yedek bağlantı hazırlanamadı', err); }
+  finally { if (cam) cam.getTracks().forEach((t) => t.stop()); }
+}
+async function onSbOffer(m) {
+  const ch = dc;
+  try {
+    const p = new RTCPeerConnection(RTC_CONF);
+    const e = { id: m.id, pc: p, ch: null, answer: null };
+    p.ondatachannel = (ev) => sbChannel(e, ev.channel);
+    await p.setRemoteDescription({ type: 'offer', sdp: m.sdp });
+    e.answer = await p.createAnswer(); // uygulanmıyor, kopunca uygulanacak
+    if (dc !== ch || !ch || ch.readyState !== 'open') { p.close(); return; }
+    while (sbTheirs.length >= SB_COUNT * 2) { try { sbTheirs.shift().pc.close(); } catch (_) {} }
+    sbTheirs.push(e);
+    ch.send(JSON.stringify({ t: 'sb-answer', id: m.id, sdp: e.answer.sdp }));
+  } catch (err) { console.warn('Yedek cevap hazırlanamadı', err); }
+}
+function onSbAnswer(m) { const e = sbMine.find((x) => x.id === m.id); if (e) e.answer = m.sdp; }
+function handleCtl(m) {
+  if (m.t === 'sb-offer') { onSbOffer(m); return true; }
+  if (m.t === 'sb-answer') { onSbAnswer(m); return true; }
+  return false;
+}
+// Kopunca: tüm hazır yedekleri devreye al. Hangisi önce açılırsa (gönderenin seçtiği) o kullanılır.
+function activateStandby() {
+  const list = [];
+  for (const e of sbMine) {
+    if (e.answer) { list.push(e); e.pc.setRemoteDescription({ type: 'answer', sdp: e.answer }).catch(() => {}); }
+    else { try { e.pc.close(); } catch (_) {} }
+  }
+  for (const e of sbTheirs) { list.push(e); e.pc.setLocalDescription(e.answer).catch(() => {}); }
+  sbMine = []; sbTheirs = []; sbLive = list;
+  for (const e of list) {
+    e.pc.onconnectionstatechange = () => {
+      if (e.pc.connectionState !== 'failed' || !sbLive.includes(e)) return;
+      try { e.pc.close(); } catch (_) {}
+      sbLive = sbLive.filter((x) => x !== e);
+      if (!sbLive.length && !linkUp && role) setConn('lost');
+    };
+  }
+  return list.length > 0;
+}
+function adoptStandby(e) {
+  if (linkUp || !e.ch) return;
+  for (const x of sbLive) if (x !== e) { try { x.pc.close(); } catch (_) {} }
+  sbLive = [];
+  closePc();
+  pc = e.pc; dc = e.ch; e.pc.onconnectionstatechange = null; watchPc(pc);
+  if (role === 'send') {
+    try { dc.send(JSON.stringify({ t: 'use' })); } catch (_) { closePc(); setConn('lost'); return; }
+    linkReady(); setupSender();
+  }
+  else { dc.onmessage = onRecvMsg; linkReady(); setupReceiver(); }
+  prepareStandby(true);
 }
 
 // ───────────────────────── Bağlantı durumu ─────────────────────────
@@ -245,43 +384,51 @@ function linkReady() {
   setConn('up'); keepAwake();
 }
 function setConn(st) {
-  $('connTitle').textContent = st === 'up' ? 'Bağlandı ✓' : st === 'weak' ? 'Bağlantı zayıf…' : 'Bağlantı koptu ✗';
+  $('connTitle').textContent = { up: 'Bağlandı ✓', weak: 'Bağlantı zayıf…', retry: 'Bağlantı koptu, yeniden bağlanıyor…', lost: 'Bağlantı koptu ✗' }[st];
   $('connMsg').hidden = st === 'up';
-  $('connMsg').textContent = st === 'weak'
-    ? 'Telefonlar birbirine ulaşamıyor, bekleniyor. İki telefonda da bu sayfa ve ekran açık kalsın.'
-    : 'Genelde telefonlardan birinin ekranı kilitlenince ya da başka uygulamaya geçilince olur. İki telefonda da “Yeniden bağlan”a basıp QR’ları tekrar okut. Gelen dosyalar kaybolmaz, kalanlar kaldığı yerden gönderilir.';
-  $('btnReconnect').hidden = st !== 'lost';
+  $('connMsg').textContent = {
+    weak: 'Telefonlar birbirine ulaşamıyor, bekleniyor. İki telefonda da bu sayfa ve ekran açık kalsın.',
+    retry: 'Diğer telefonda da bu sayfayı aç (ekranı kilitlendiyse kilidini aç); bağlantı kendiliğinden gelir, QR gerekmez. Bir dakika içinde gelmezse “QR ile bağlan”a bas.',
+    lost: 'İki telefonda da “Yeniden bağlan”a basıp QR’ları tekrar okut. Gelen dosyalar kaybolmaz, kalanlar kaldığı yerden gönderilir.',
+  }[st] || '';
+  const b = $('btnReconnect');
+  b.hidden = st !== 'lost' && st !== 'retry';
+  b.textContent = st === 'retry' ? 'QR ile bağlan' : '🔄 Yeniden bağlan';
+  b.className = st === 'retry' ? 'sec' : '';
   if (role === 'send') renderSend();
 }
 function lost() {
   if (!linkUp) return;
-  linkUp = false; closePc(); setConn('lost');
+  linkUp = false; closePc();
   if (role === 'send') senderLost(); else receiverLost();
+  setConn(activateStandby() ? 'retry' : 'lost');
 }
 
 // ───────────────────────── Eşleşme ekranları ─────────────────────────
 async function startSender() {
   const my = ++gen, live = () => { if (my !== gen) throw STOPPED; };
-  role = 'send'; $('log').textContent = ''; show('pair'); keepAwake();
+  role = 'send'; dropStandby(); $('log').textContent = ''; show('pair'); keepAwake();
   $('pairTitle').textContent = 'Gönderen'; $('pairHint').textContent = ''; $('qrBox').hidden = true;
   $('pairStatus').textContent = 'Kamera açılıyor…';
   await startCam(my); live();
   $('pairStatus').textContent = 'Bağlantı kodu hazırlanıyor…';
   const offer = await createOffer(); live();
   renderQr(offer);
-  $('pairHint').textContent = '1) Diğer telefonda “Al”a (ya da “Yeniden bağlan”a) bas ve bu QR’ı okut. 2) Sonra onun ekranında çıkan QR’ı bu telefonun kamerasına (aşağıda) göster.';
+  $('pairHint').textContent = '1) Diğer telefonda “Al”a (ya da “Yeniden bağlan”a) bas ve bu QR’ı okut. 2) Sonra onun ekranında çıkan QR’ı bu telefonun kamerasına (aşağıda) göster. Kamera odaklanamazsa telefonu biraz uzaklaştır (20–30 cm).';
   $('pairStatus').textContent = 'Cevap QR’ı bekleniyor…';
   const ans = await scanFor('A1:a:'); live();
   $('qrBox').hidden = true; $('pairStatus').textContent = 'Bağlanıyor…';
   await acceptAnswer(ans); live();
-  stopCam(); linkReady(); setupSender(); show('send');
+  $('camBox').hidden = true; scanning = false;
+  linkReady(); setupSender(); show('send');
+  prepareStandby(false).finally(() => { if (my === gen) stopCam(); }); // kamera, yedekler hazırlanınca kapanır
 }
 async function startReceiver() {
   const my = ++gen, live = () => { if (my !== gen) throw STOPPED; };
-  role = 'recv'; $('log').textContent = ''; show('pair'); keepAwake();
+  role = 'recv'; dropStandby(); $('log').textContent = ''; show('pair'); keepAwake();
   await recvInit(); live();
   $('pairTitle').textContent = 'Alan'; $('qrBox').hidden = true;
-  $('pairHint').textContent = 'Gönderen telefonun ekranındaki QR’ı okut.';
+  $('pairHint').textContent = 'Gönderen telefonun ekranındaki QR’ı okut. Kamera odaklanamazsa telefonu biraz uzaklaştır (20–30 cm).';
   $('pairStatus').textContent = 'Kamera açılıyor…';
   await startCam(my); live();
   $('pairStatus').textContent = 'QR bekleniyor…';
@@ -293,27 +440,27 @@ async function startReceiver() {
   $('pairStatus').textContent = 'Bağlantı bekleniyor…';
   const ch = await channel; live();
   await waitOpen(ch); live();
-  dc = ch; stopCam(); $('qrBox').hidden = true; linkReady(); setupReceiver(); show('recv');
+  dc = ch; $('camBox').hidden = true; scanning = false; $('qrBox').hidden = true;
+  linkReady(); setupReceiver(); show('recv');
+  prepareStandby(false).finally(() => { if (my === gen) stopCam(); });
 }
 
 // ───────────────────────── Gönderme ─────────────────────────
 // Her dosyanın bu oturuma özel bir kimliği var; bağlantı koparsa alan taraf elindekileri bildirir,
 // yeniden bağlanınca sadece eksikler gönderilir.
-const SID = Math.random().toString(36).slice(2, 7);
 const queue = []; // {id, file, st: wait | busy | sent | ok | bad}
-let nextNo = 1, sending = false, probing = 0;
+let nextNo = 1, sending = false, probing = 0, resumePending = false;
 
 function setupSender() {
   if (!setupSender.done) {
     setupSender.done = true;
     $('files').onchange = () => addFiles($('files'));
-    $('files2').onchange = () => addFiles($('files2'));
     $('btnStart').onclick = () => sendAll().catch(logErr);
   }
   renderSend(); updateSendStatus();
 }
 
-// Dosya gerçekten okunabiliyor mu? Android'de galeriden seçilen bazı videolar seçilebiliyor ama okunamıyor.
+// Dosya gerçekten okunabiliyor mu? Android'in galeri seçicisinden gelen dosyalar bazen seçilebiliyor ama okunamıyor.
 async function canRead(f) {
   try {
     const n = Math.min(f.size, 64 * 1024);
@@ -342,7 +489,7 @@ function renderSend() {
   const b = $('btnStart');
   b.disabled = sending || probing > 0 || !linkUp || !wait.length;
   b.textContent = sending ? 'Gönderiliyor…' : wait.length ? `Gönder (${wait.length})` : 'Gönder';
-  $('pickLbl').hidden = sending; $('pickLbl2').hidden = sending;
+  $('pickLbl').hidden = sending;
   $('pickTxt').textContent = queue.length ? 'Başka fotoğraf / video seç' : 'Fotoğraf / video seç';
   $('sendList').innerHTML = queue.map((q) => `<li class="${q.st}"><span class="n">${esc(q.file.name)}</span><span class="s">${SEND_LABEL[q.st](q)}</span></li>`).join('');
 }
@@ -363,10 +510,21 @@ function markOk(id) {
 function onSenderMsg(e) {
   if (typeof e.data !== 'string') return;
   let m; try { m = JSON.parse(e.data); } catch (_) { return; }
+  if (handleCtl(m)) return;
   if (m.t === 'ack') markOk(m.i);
-  else if (m.t === 'have' && Array.isArray(m.ids)) m.ids.forEach(markOk);
+  else if (m.t === 'have' && Array.isArray(m.ids)) {
+    m.ids.forEach(markOk);
+    // Bağlantı gönderim sırasında koptuysa kalanları kendiliğinden göndermeye devam et
+    if (resumePending) { resumePending = false; resumeSend(); }
+  }
+}
+function resumeSend() {
+  if (!linkUp) return;
+  if (sending) return void setTimeout(resumeSend, 300);
+  if (queue.some((q) => q.st === 'wait')) sendAll().catch(logErr);
 }
 function senderLost() {
+  if (sending || queue.some((q) => q.st === 'busy' || q.st === 'sent')) resumePending = true;
   queue.forEach((q) => { if (q.st === 'busy' || q.st === 'sent') q.st = 'wait'; });
   $('sendProg').hidden = true; renderSend(); updateSendStatus();
 }
@@ -471,16 +629,20 @@ async function recvInit() {
   } catch (_) { useOpfs = false; }
   if (!useOpfs) return;
   worker.onmessage = onWorkerMsg;
-  // Aktarım ortasında sayfa kapandıysa yarım kalan dosyayı sil
-  try {
-    const name = await (await (await root.getFileHandle('.partial')).getFile()).text();
-    if (name) await root.removeEntry(name).catch(() => {});
-    await root.removeEntry('.partial');
-  } catch (_) {}
+  // Aktarım ortasında sayfa kapandıysa yarım kalan dosyayı sil. Önceki sayfa dosyanın kilidini hemen
+  // bırakmayabiliyor: birkaç kez dene, olmazsa işareti bırak (bir sonraki açılışta yine denenir).
+  let partial = '';
+  try { partial = await (await (await root.getFileHandle('.partial')).getFile()).text(); } catch (_) {}
+  let partialGone = !partial;
+  for (let i = 0; i < 10 && !partialGone; i++) {
+    try { await root.removeEntry(partial); partialGone = true; }
+    catch (e) { if (e.name === 'NotFoundError') partialGone = true; else await sleep(300); }
+  }
+  if (partialGone) await root.removeEntry('.partial').catch(() => {});
   // Önceki oturumdan kalan (kaydedilmemiş) dosyaları da listele — sayfa çökse bile kaybolmasın
   const empty = [];
   for await (const [n, hnd] of root.entries()) {
-    if (hnd.kind !== 'file' || n.startsWith('.')) continue;
+    if (hnd.kind !== 'file' || n.startsWith('.') || n === partial) continue;
     const f = await hnd.getFile(); if (!f.size) { empty.push(n); continue; }
     const m = n.match(/^\d+_([^_]*)__(.*)$/);
     const orig = m ? m[2] : n;
@@ -511,7 +673,8 @@ function finishFile(id, key, blob) {
 function onRecvMsg(e) {
   const prog = $('recvProg');
   if (typeof e.data === 'string') {
-    const m = JSON.parse(e.data);
+    let m; try { m = JSON.parse(e.data); } catch (_) { return; }
+    if (handleCtl(m)) return;
     if (m.t === 'batch') { batch = m; gotTotal = 0; batchNo = 0; prog.hidden = false; prog.max = m.total || 1; prog.value = 0; }
     else if (m.t === 'file') {
       if (cur && useOpfs) worker.postMessage({ op: 'abort', name: cur.key });
@@ -596,20 +759,30 @@ async function clearSaved() {
 }
 
 // ───────────────────────── Başlat ─────────────────────────
+// Android'de galeri seçicisi bazı dosyaları okutmuyor; dosya yöneticisi sorunsuz. Bu yüzden Android'de dosya yöneticisi açılır.
+if (IS_ANDROID) { $('files').removeAttribute('accept'); $('pickHint').hidden = false; }
 const pairFail = (e) => { if (e === STOPPED) return; stopCam(); logErr(e); };
 $('btnSend').onclick = () => startSender().catch(pairFail);
 $('btnRecv').onclick = () => startReceiver().catch(pairFail);
 $('btnReconnect').onclick = () => (role === 'send' ? startSender() : startReceiver()).catch(pairFail);
 $('btnCancel').onclick = () => {
   if (!everUp) return location.reload();
-  // Yeniden bağlanırken vazgeçildi: dosyalar dursun, bağlantı ekranına dön
+  // QR ile yeniden bağlanırken vazgeçildi: dosyalar dursun, bağlantı ekranına dön
   gen++; stopCam(); closePc(); $('qrBox').hidden = true; linkUp = false; setConn('lost'); show(role);
 };
+// Telefon askıdan dönünce bağlantı çoktan ölmüş olabilir: kısa sürede toparlanmazsa yedekle bağlan
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !linkUp || !pc) return;
+  const me = pc;
+  setTimeout(() => { if (pc === me && linkUp && me.connectionState !== 'connected') lost(); }, 4000);
+});
 if (!window.RTCPeerConnection || !window.CompressionStream) $('homeInfo').textContent = 'Bu tarayıcı desteklenmiyor (güncel Chrome / Safari gerekli).';
 if (!window.isSecureContext) $('homeInfo').textContent = 'Kamera için sayfa HTTPS üzerinden açılmalı.';
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 // Test için dışarı açılan fonksiyonlar
 window.__aktar = { createOffer, acceptAnswer, createAnswer, waitOpen, linkReady, setupSender, setupReceiver, recvInit, addFiles, sendAll, lost, show,
+  prepareStandby, dropLink: () => closePc(),
+  standby: () => ({ mine: sbMine.length, answered: sbMine.filter((e) => e.answer).length, theirs: sbTheirs.length, live: sbLive.length }),
   queue, received, get dc() { return dc; }, set dc(v) { dc = v; }, get pc() { return pc; }, set role(v) { role = v; }, get linkUp() { return linkUp; } };
 </script>
 </body>

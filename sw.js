@@ -1,5 +1,5 @@
 // Uygulama dosyalarını önbelleğe alır: internet olmasa da (ör. sadece hotspot) açılır.
-const CACHE = 'aktar-v2';
+const CACHE = 'aktar-v3';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png'];
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES))); self.skipWaiting(); });
 self.addEventListener('activate', (e) => {
