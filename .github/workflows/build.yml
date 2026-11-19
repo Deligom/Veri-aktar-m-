@@ -48,11 +48,11 @@ jobs:
           run = os.environ["GITHUB_RUN_NUMBER"]
           base = f"https://github.com/{repo}/releases/download/latest"
           src = {
-            "name": "İndir",
+            "name": "Indir",
             "identifier": "com.kisisel.indir.source",
             "subtitle": "Kişisel video indirici",
             "apps": [{
-              "name": "İndir",
+              "name": "Indir",
               "bundleIdentifier": "com.kisisel.indir",
               "developerName": "Kişisel",
               "subtitle": "Tarayıcıdan video indir",

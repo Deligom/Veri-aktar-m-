@@ -25,7 +25,7 @@ targets:
     info:
       path: Indir/Info.plist
       properties:
-        CFBundleDisplayName: İndir
+        CFBundleDisplayName: Indir
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
