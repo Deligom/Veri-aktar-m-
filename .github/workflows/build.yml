@@ -29,6 +29,7 @@ jobs:
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            MARKETING_VERSION="1.0.${GITHUB_RUN_NUMBER}" CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}" \
             build | tail -n 80
 
       - name: IPA paketle
@@ -37,6 +38,46 @@ jobs:
           cp -R build/Build/Products/Release-iphoneos/Indir.app Payload/
           zip -qry Indir.ipa Payload
           ls -lh Indir.ipa
+
+      - name: SideStore kaynağını oluştur
+        run: |
+          python3 - <<'EOF'
+          import json, os, datetime
+          repo = os.environ["GITHUB_REPOSITORY"]
+          branch = os.environ["GITHUB_REF_NAME"]
+          run = os.environ["GITHUB_RUN_NUMBER"]
+          base = f"https://github.com/{repo}/releases/download/latest"
+          src = {
+            "name": "İndir",
+            "identifier": "com.kisisel.indir.source",
+            "subtitle": "Kişisel video indirici",
+            "apps": [{
+              "name": "İndir",
+              "bundleIdentifier": "com.kisisel.indir",
+              "developerName": "Kişisel",
+              "subtitle": "Tarayıcıdan video indir",
+              "localizedDescription": "Yerleşik tarayıcıyla sitelerdeki videoları yakalayıp indiren kişisel uygulama.",
+              "iconURL": f"https://raw.githubusercontent.com/{repo}/{branch}/Indir/Assets.xcassets/AppIcon.appiconset/icon-1024.png",
+              "tintColor": "#ED3861",
+              "versions": [{
+                "version": f"1.0.{run}",
+                "buildVersion": run,
+                "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "downloadURL": f"{base}/Indir.ipa",
+                "size": os.path.getsize("Indir.ipa"),
+                "minOSVersion": "16.0",
+                "localizedDescription": f"Otomatik derleme #{run}"
+              }],
+              "appPermissions": {
+                "entitlements": [],
+                "privacy": {"NSPhotoLibraryAddUsageDescription": "İndirdiğiniz videoları Fotoğraflar'a kaydetmek için."}
+              }
+            }],
+            "news": []
+          }
+          json.dump(src, open("source.json", "w"), ensure_ascii=False, indent=2)
+          EOF
+          cat source.json
 
       - uses: actions/upload-artifact@v4
         with:
@@ -49,7 +90,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest Indir.ipa \
+          gh release create latest Indir.ipa source.json \
             --title "İndir — son sürüm" \
             --notes "Otomatik derleme: ${GITHUB_SHA::7}. Indir.ipa dosyasını indirip Sideloadly ile iPhone'a kurun (README'ye bakın)." \
             --target "$GITHUB_SHA"

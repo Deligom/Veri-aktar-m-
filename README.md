@@ -15,26 +15,52 @@ Uygulamanın içinde bir tarayıcı var. Siteye giriyorsun, videoyu oynatıyorsu
 - Dosyalar uygulamasında görünür: *Dosyalar → iPhone'umda → İndir*
 - Panodaki bağlantıyı tek dokunuşla açma ("Yapıştır" düğmesi)
 
-## iPhone'a kurulum (Windows PC ile)
+## iPhone'a kurulum: SideStore (PC'ye sadece bir kez gerek var)
 
-Uygulama App Store'da olmadığı için **Sideloadly** ile kendi Apple ID'nle kuruyorsun.
+SideStore, uygulamayı kendi Apple ID'nle imzalayıp **7 günlük süreyi telefonun üzerinden yeniler**.
+PC'ye yalnızca ilk kurulumda ihtiyaç var. Sonrasında kablo da PC de gerekmez.
 
-1. **Hazırlık (bir kerelik):** PC'ye Apple'ın sitesinden **iTunes** ve **iCloud** kur.
-   Microsoft Store sürümleri değil, apple.com'daki "Windows için" sürümler olmalı.
-   Sonra [sideloadly.io](https://sideloadly.io) adresinden Sideloadly'yi indir.
-2. **IPA dosyasını indir:** Bu deponun **Releases → latest** bölümünden `Indir.ipa` dosyasını indir.
-3. iPhone'u kabloyla PC'ye bağla. Telefonda "Bu bilgisayara güven" sorusuna **Güven** de.
-4. Sideloadly'yi aç. `Indir.ipa` dosyasını pencereye sürükle, Apple ID e-postanı yaz, **Start**'a bas.
-   Apple ID şifresini Sideloadly ister. Şifre yalnızca Apple'a gider.
-5. iPhone'da:
-   - **Ayarlar → Gizlilik ve Güvenlik → Geliştirici Modu**'nu aç. Telefon yeniden başlar.
-   - **Ayarlar → Genel → VPN ve Aygıt Yönetimi**'nde kendi Apple ID'ne dokun ve **Güven** de.
-6. "İndir" uygulamasını aç. İlk kaydetmede Fotoğraflar izni ister.
+### A. PC'de hazırlık (bir kerelik)
+1. **iTunes**'u apple.com'dan kur. Microsoft Store sürümü değil, "Windows için iTunes" olmalı.
+   iloader'ın telefonu görebilmesi için iTunes'un sürücüsü gerekiyor.
+2. **iloader**'ı SideStore'un sitesinden ([docs.sidestore.io](https://docs.sidestore.io/docs/installation/install)) indir ve kur.
 
-**7 gün kuralı:** Ücretsiz Apple ID ile kurulan uygulama 7 gün sonra açılmaz.
-Sideloadly'de aynı işlemi tekrarlaman yeterli, indirdiğin dosyalar silinmez.
-Sideloadly'nin *Auto-refresh* seçeneği PC açıkken ve aynı Wi‑Fi'deyken bunu kendisi yapar.
-Yıllık 99$'lık Apple Developer hesabın olursa süre 1 yıla çıkar.
+### B. iPhone'da hazırlık
+1. App Store'dan **LocalDevVPN** uygulamasını kur. SideStore'un PC'siz yenileme yapabilmesi için gerekli.
+2. **Ayarlar → Gizlilik ve Güvenlik → Geliştirici Modu**'nu aç. Telefon yeniden başlar ve açılınca onay ister.
+
+### C. SideStore'u kur
+1. iPhone'u kabloyla PC'ye bağla. Telefonda **Güven** de ve şifreni gir.
+2. iloader'ı aç, Apple ID'nle giriş yap, telefonunu seç ve **Install SideStore (Stable)**'a bas.
+3. iPhone'da **Ayarlar → Genel → VPN ve Aygıt Yönetimi**'nde kendi Apple ID'ne dokun ve **Güven** de.
+4. **LocalDevVPN**'i aç ve **Connect**'e bas.
+5. **SideStore**'u aç ve aynı Apple ID ile giriş yap. *My Apps* sekmesinde SideStore'un yanındaki
+   **7 DAYS** yazısına dokunup bir kez yenile. Yenileme başarılıysa kurulum tamam, kabloyu çıkarabilirsin.
+
+### D. İndir'i SideStore'dan kur
+1. SideStore'da **Sources → +** düğmesine bas ve şu adresi ekle:
+   ```
+   https://github.com/Deligom/Veri-aktar-m-/releases/download/latest/source.json
+   ```
+2. Kaynakta **İndir**'i bul ve **Free / Install**'a bas. LocalDevVPN açık olmalı.
+3. Yeni bir sürüm çıktığında SideStore'da güncelleme olarak görünür. Dosya indirmene gerek kalmaz.
+
+> İndir'i daha önce Sideloadly ile kurduysan önce telefondan sil. SideStore yalnızca kendi kurduğu uygulamaları yenileyebilir.
+> İndirdiğin videolar Fotoğraflar'a kaydedildiyse silinmez.
+
+### 7 günlük yenileme
+- Birkaç günde bir **LocalDevVPN → Connect**, sonra **SideStore → My Apps → Refresh All**. Bu kadar, her yerde çalışır.
+- SideStore'un arka planda kendiliğinden yenileme özelliği de var. iOS her zaman izin vermediği için
+  süre bitmeden arada bir elle yenilemek en garantisi. Süre tamamen biterse uygulamalar açılmaz,
+  ama SideStore'dan yenileyince geri gelir. Veriler silinmez.
+- SideStore'un kendi süresi de dolarsa onu da aynı şekilde yenilersin. Nadiren ("pairing file" bozulursa)
+  bir kez daha iloader ile PC'ye bağlamak gerekebilir.
+- Ücretsiz Apple ID ile aynı anda en fazla **3 uygulama** kurulabilir. SideStore kendisi bunlardan biri sayılır.
+
+### Alternatif: Sideloadly
+Sadece PC ile kurmak istersen bu deponun **Releases → latest** bölümündeki `Indir.ipa` dosyasını
+[Sideloadly](https://sideloadly.io) ile kurabilirsin. Bu yolda "Auto-refresh" seçeneği, PC açıkken ve
+telefon aynı Wi‑Fi'deyken yenilemeyi kendisi yapar.
 
 ## Kullanım
 
