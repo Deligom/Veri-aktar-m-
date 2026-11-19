@@ -355,14 +355,19 @@ final class TSRemuxer {
     private func writeSorted(_ samples: [Sample]) throws {
         let sorted = samples.sorted { $0.dts < $1.dts }
         for var s in sorted {
-            // Yayın kesintilerinde (reklam vb.) zamanın geriye gitmesini engelle
+            // Zaman çizgisini sürekli tut: yayın kesintilerinde (reklam, yeni klip, sunucu
+            // değişimi) zaman damgaları ileri ya da geri sıçrayabilir. 2 saniyeden büyük ileri
+            // ya da 1 saniyeden büyük geri sıçramaları kapat; yoksa son kare dakikalarca donar.
             s.pts += offset
             s.dts += offset
-            if s.isVideo, let last = lastDTS[true], s.dts < last - 90_000 {
-                let shift = last + (lastDuration[true] ?? 3000) - s.dts
-                offset += shift
-                s.pts += shift
-                s.dts += shift
+            if let last = lastDTS[s.isVideo] {
+                let expected = last + (lastDuration[s.isVideo] ?? (s.isVideo ? 3000 : 1920))
+                let delta = s.dts - expected
+                if delta > 180_000 || delta < -90_000 {
+                    offset -= delta
+                    s.pts -= delta
+                    s.dts -= delta
+                }
             }
             if let last = lastDTS[s.isVideo], s.dts <= last {
                 let fix = last + 1 - s.dts

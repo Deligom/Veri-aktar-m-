@@ -87,6 +87,10 @@ final class HLSDownloader {
 
         switch (video, audio) {
         case (.muxed(let v), nil):
+            // Ses görüntüden belirgin uzunsa (son kare donuk kalır) görüntü süresine kırp
+            if await Self.tracksMismatch(v) {
+                if (try? await Self.mux(video: v, audio: v, to: final)) != nil { return final }
+            }
             return v
         case (.fragmented(let v), nil):
             if (try? await Self.exportPassthrough(AVURLAsset(url: v), to: final)) != nil { return final }
@@ -435,6 +439,15 @@ final class HLSDownloader {
             try ca?.insertTimeRange(CMTimeRange(start: aRange.start, duration: duration), of: at, at: .zero)
         }
         try await exportPassthrough(comp, to: out)
+    }
+
+    static func tracksMismatch(_ url: URL) async -> Bool {
+        let asset = AVURLAsset(url: url)
+        guard let v = try? await asset.loadTracks(withMediaType: .video).first,
+              let a = try? await asset.loadTracks(withMediaType: .audio).first,
+              let vr = try? await v.load(.timeRange),
+              let ar = try? await a.load(.timeRange) else { return false }
+        return CMTimeGetSeconds(ar.end) - CMTimeGetSeconds(vr.end) > 2
     }
 
     static func exportPassthrough(_ asset: AVAsset, to out: URL) async throws {
