@@ -45,16 +45,16 @@ final class BrowserModel: ObservableObject {
 
     // MARK: Sekmeler
 
-    private func makeTab() -> BrowserTab {
-        let t = BrowserTab()
+    private func makeTab(isPrivate: Bool = false) -> BrowserTab {
+        let t = BrowserTab(isPrivate: isPrivate)
         t.owner = self
         return t
     }
 
     @discardableResult
-    func newTab(url: URL? = nil) -> BrowserTab {
+    func newTab(url: URL? = nil, isPrivate: Bool = false) -> BrowserTab {
         current.captureSnapshot()
-        let t = makeTab()
+        let t = makeTab(isPrivate: isPrivate)
         if let i = tabs.firstIndex(where: { $0.id == currentID }) {
             tabs.insert(t, at: i + 1)
         } else {
@@ -96,16 +96,21 @@ final class BrowserModel: ObservableObject {
     }
 
     func saveSession() {
-        let list: [[String: String]] = tabs.compactMap { t in
-            guard !t.showStart || t.pendingURL != nil, let url = t.displayURL else { return nil }
+        guard UserDefaults.standard.object(forKey: "restoreTabs") as? Bool ?? true else {
+            UserDefaults.standard.removeObject(forKey: Self.sessionKey)
+            return
+        }
+        let kept = tabs.filter { !$0.isPrivate && (!$0.showStart || $0.pendingURL != nil) }
+        let list: [[String: String]] = kept.compactMap { t in
+            guard let url = t.displayURL else { return nil }
             return ["url": url.absoluteString, "title": t.displayTitle]
         }
-        let index = tabs.filter { !$0.showStart || $0.pendingURL != nil }
-            .firstIndex { $0.id == currentID } ?? 0
+        let index = kept.firstIndex { $0.id == currentID } ?? 0
         UserDefaults.standard.set(["tabs": list, "index": index] as [String: Any], forKey: Self.sessionKey)
     }
 
     private func restoreSession() {
+        guard UserDefaults.standard.object(forKey: "restoreTabs") as? Bool ?? true else { return }
         guard let dict = UserDefaults.standard.dictionary(forKey: Self.sessionKey),
               let list = dict["tabs"] as? [[String: String]], !list.isEmpty else { return }
         for entry in list.prefix(20) {
@@ -159,6 +164,7 @@ final class BrowserModel: ObservableObject {
     // MARK: Geçmiş
 
     func recordVisit(url: URL, title: String) {
+        guard UserDefaults.standard.object(forKey: "saveHistory") as? Bool ?? true else { return }
         guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return }
         if let first = history.first, first.url == url.absoluteString {
             if !title.isEmpty { history[0].title = title }
@@ -191,6 +197,44 @@ final class BrowserModel: ObservableObject {
         if let data = try? JSONEncoder().encode(history) {
             try? data.write(to: Self.historyURL, options: .atomic)
         }
+    }
+
+    // MARK: Gizlilik
+
+    /// Çerezleri, önbelleği ve tüm site verilerini siler (sitelerdeki oturumlar kapanır).
+    func clearWebsiteData() async {
+        let store = WKWebsiteDataStore.default()
+        await store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
+        URLCache.shared.removeAllCachedResponses()
+        if let cookies = HTTPCookieStorage.shared.cookies {
+            for c in cookies { HTTPCookieStorage.shared.deleteCookie(c) }
+        }
+        for t in tabs where !t.showStart { t.webView.reload() }
+    }
+
+    func clearCache() async {
+        let types: Set<String> = [WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache,
+                                  WKWebsiteDataTypeFetchCache, WKWebsiteDataTypeOfflineWebApplicationCache]
+        await WKWebsiteDataStore.default().removeData(ofTypes: types, modifiedSince: .distantPast)
+        URLCache.shared.removeAllCachedResponses()
+    }
+
+    func restoreDefaultBookmarks() {
+        UserDefaults.standard.removeObject(forKey: Self.bookmarksKey)
+        loadBookmarks()
+    }
+
+    /// Uygulamayı ilk kurulduğu hâline döndürür.
+    func resetEverything() async {
+        clearHistory()
+        await clearWebsiteData()
+        closeAll()
+        UserDefaults.standard.removeObject(forKey: Self.sessionKey)
+        for key in ["autoSavePhotos", "deleteAfterSave", "saveHistory", "restoreTabs", "appLock"] {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+        restoreDefaultBookmarks()
+        DownloadManager.shared.deleteAll()
     }
 
     // MARK: Kısayollar
@@ -233,11 +277,11 @@ final class BrowserModel: ObservableObject {
 
     // MARK: İndirme
 
-    func headers(url: URL, page: URL?) async -> [String: String] {
+    func headers(url: URL, page: URL?, store: WKWebsiteDataStore = .default()) async -> [String: String] {
         var h: [String: String] = [:]
         if let ua = userAgent { h["User-Agent"] = ua }
         if let page { h["Referer"] = page.absoluteString }
-        let cookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
+        let cookies = await store.httpCookieStore.allCookies()
         let host = (url.host ?? "").lowercased()
         let matching = cookies.filter { c in
             var d = c.domain.lowercased()
@@ -248,9 +292,10 @@ final class BrowserModel: ObservableObject {
         return h
     }
 
-    func download(_ m: DetectedMedia) {
+    func download(_ m: DetectedMedia, from tab: BrowserTab) {
+        let store = tab.webView.configuration.websiteDataStore
         Task { @MainActor in
-            let h = await self.headers(url: m.url, page: m.pageURL)
+            let h = await self.headers(url: m.url, page: m.pageURL, store: store)
             var name = m.displayName
             if m.height > 0 { name += " (\(m.qualityBadge))" }
             DownloadManager.shared.start(url: m.url, title: name, pageURL: m.pageURL,

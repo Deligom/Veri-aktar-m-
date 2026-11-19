@@ -68,7 +68,12 @@ struct TabCard: View {
             // Kartın kendisi: dokununca sekmeye geç
             Button(action: onSelect) {
                 VStack(spacing: 0) {
-                    HStack {
+                    HStack(spacing: 4) {
+                        if tab.isPrivate {
+                            Image(systemName: "eye.slash.fill")
+                                .font(.caption2)
+                                .foregroundColor(Theme.accent)
+                        }
                         Text(tab.displayTitle)
                             .font(.caption.weight(.semibold))
                             .foregroundColor(.primary)

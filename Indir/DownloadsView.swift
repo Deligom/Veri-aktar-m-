@@ -3,7 +3,6 @@ import AVKit
 
 struct DownloadsView: View {
     @EnvironmentObject var downloads: DownloadManager
-    @AppStorage("autoSavePhotos") private var autoSave = true
     @State private var playing: DownloadItem?
 
     var body: some View {
@@ -53,7 +52,6 @@ struct DownloadsView: View {
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
-                        Toggle("Fotoğraflar'a otomatik kaydet", isOn: $autoSave)
                         Button(role: .destructive) { downloads.clearFailed() } label: {
                             Label("Başarısızları temizle", systemImage: "xmark.bin")
                         }

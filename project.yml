@@ -32,6 +32,7 @@ targets:
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         NSPhotoLibraryAddUsageDescription: İndirdiğiniz videoları Fotoğraflar'a kaydetmek için.
+        NSFaceIDUsageDescription: Uygulama kilidini Face ID ile açmak için.
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         UISupportedInterfaceOrientations:

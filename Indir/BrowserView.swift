@@ -66,8 +66,9 @@ struct BrowserContent: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass").foregroundColor(.secondary)
-                    TextField("Ara veya adres yaz", text: $address)
+                    Image(systemName: tab.isPrivate ? "eye.slash.fill" : "magnifyingglass")
+                        .foregroundColor(tab.isPrivate ? Theme.accent : .secondary)
+                    TextField(tab.isPrivate ? "Gizli sekme — ara veya adres yaz" : "Ara veya adres yaz", text: $address)
                         .keyboardType(.webSearch)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -172,6 +173,9 @@ struct BrowserContent: View {
             Menu {
                 Button { browser.newTab() } label: {
                     Label("Yeni sekme", systemImage: "plus.square.on.square")
+                }
+                Button { browser.newTab(isPrivate: true) } label: {
+                    Label("Yeni gizli sekme", systemImage: "eye.slash")
                 }
                 Button { browser.showHistory = true } label: {
                     Label("Geçmiş", systemImage: "clock.arrow.circlepath")
@@ -333,7 +337,7 @@ struct MediaSheet: View {
                 Section {
                     ForEach(tab.media) { m in
                         Button {
-                            browser.download(m)
+                            browser.download(m, from: tab)
                             dismiss()
                         } label: {
                             MediaRow(media: m, showTitle: !sameTitle)

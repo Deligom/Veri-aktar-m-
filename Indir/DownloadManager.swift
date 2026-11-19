@@ -3,9 +3,11 @@ import AVFoundation
 import Photos
 import UIKit
 
-/// İndirmeleri yönetir. Doğrudan dosyalar için arka plan URLSession,
-/// HLS (m3u8) akışları için AVAssetDownloadURLSession kullanır; akışlar sonra MP4'e çevrilir.
-/// Tüm delege çağrıları ana kuyrukta gelir.
+/// İndirmeleri yönetir.
+/// - Doğrudan dosyalar arka plan URLSession ile iner (ekran kapalıyken de sürer).
+///   Site arka plan isteğini reddederse bir kez normal oturumla yeniden denenir.
+/// - HLS akışları HLSDownloader ile parça parça indirilip MP4'e birleştirilir.
+/// Durum değişiklikleri hep ana iş parçacığında yapılır.
 final class DownloadManager: NSObject, ObservableObject {
     static let shared = DownloadManager()
 
@@ -15,11 +17,14 @@ final class DownloadManager: NSObject, ObservableObject {
     var backgroundCompletionHandlers: [String: () -> Void] = [:]
 
     private var fileSession: URLSession!
-    private var hlsSession: AVAssetDownloadURLSession!
     private var tasks: [UUID: URLSessionTask] = [:]
+    private var jobs: [UUID: Task<Void, Never>] = [:]
     private var pendingErrors: [UUID: String] = [:]
+    private var needsFallback = Set<UUID>()
+    private var pendingFiles: [UUID: (url: URL, ext: String)] = [:]
     private var lastTick: [UUID: Date] = [:]
     private var reservedNames = Set<String>()
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
     static var documents: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -35,22 +40,23 @@ final class DownloadManager: NSObject, ObservableObject {
         items.filter { $0.state == .downloading || $0.state == .converting }.count
     }
 
+    var totalSizeText: String {
+        let total = items.compactMap { fileURL($0) }
+            .compactMap { try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize }
+            .reduce(0, +)
+        return ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file)
+    }
+
     private override init() {
         super.init()
         load()
-
         let fc = URLSessionConfiguration.background(withIdentifier: "indir.files")
         fc.httpShouldSetCookies = false
         fc.isDiscretionary = false
         fc.sessionSendsLaunchEvents = true
         fileSession = URLSession(configuration: fc, delegate: self, delegateQueue: .main)
-
-        let hc = URLSessionConfiguration.background(withIdentifier: "indir.hls")
-        hc.isDiscretionary = false
-        hc.sessionSendsLaunchEvents = true
-        hlsSession = AVAssetDownloadURLSession(configuration: hc, assetDownloadDelegate: self, delegateQueue: .main)
-
         reconnect()
+        cleanTemporary()
     }
 
     // MARK: - Genel işlemler
@@ -79,24 +85,36 @@ final class DownloadManager: NSObject, ObservableObject {
     func cancel(_ id: UUID) {
         tasks[id]?.cancel()
         tasks[id] = nil
+        jobs[id]?.cancel()
+        jobs[id] = nil
         fail(id, "İptal edildi")
+        refreshActivity()
     }
 
     func delete(_ id: UUID) {
         tasks[id]?.cancel()
         tasks[id] = nil
-        if let item = item(id) {
-            if let url = fileURL(item) { try? FileManager.default.removeItem(at: url) }
-            if let pkg = packageURL(item) { try? FileManager.default.removeItem(at: pkg) }
+        jobs[id]?.cancel()
+        jobs[id] = nil
+        if let item = item(id), let url = fileURL(item) {
+            try? FileManager.default.removeItem(at: url)
         }
         items.removeAll { $0.id == id }
         save()
+        refreshActivity()
     }
 
     func clearFailed() {
-        for item in items where item.state == .failed {
-            delete(item.id)
+        for item in items where item.state == .failed { delete(item.id) }
+    }
+
+    func deleteAll() {
+        for item in items { delete(item.id) }
+        // Listede olmayan artık dosyaları da temizle
+        if let files = try? FileManager.default.contentsOfDirectory(at: Self.documents, includingPropertiesForKeys: nil) {
+            for f in files { try? FileManager.default.removeItem(at: f) }
         }
+        cleanTemporary()
     }
 
     func fileURL(_ item: DownloadItem) -> URL? {
@@ -117,7 +135,7 @@ final class DownloadManager: NSObject, ObservableObject {
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
             guard status == .authorized || status == .limited else {
                 DispatchQueue.main.async {
-                    self.message = "Fotoğraflar izni yok. Ayarlar > İndir > Fotoğraflar bölümünden izin verin."
+                    self.message = "Fotoğraflar izni yok. Ayarlar > Indir > Fotoğraflar bölümünden izin verin."
                 }
                 return
             }
@@ -128,9 +146,12 @@ final class DownloadManager: NSObject, ObservableObject {
                     if ok {
                         self.update(id) { $0.savedToPhotos = true }
                         self.save()
+                        if UserDefaults.standard.bool(forKey: "deleteAfterSave") {
+                            self.delete(id)
+                        }
                         if announce { self.message = "Fotoğraflar'a kaydedildi" }
                     } else if announce {
-                        self.message = "Bu video Fotoğraflar'a kaydedilemedi (biçim desteklenmiyor olabilir). Dosyalar uygulamasında İndir klasöründen erişebilirsiniz."
+                        self.message = "Bu video Fotoğraflar'a kaydedilemedi (biçim desteklenmiyor olabilir). Dosyalar uygulamasında Indir klasöründen erişebilirsiniz."
                     }
                 }
             }
@@ -148,13 +169,6 @@ final class DownloadManager: NSObject, ObservableObject {
         body(&items[i])
     }
 
-    private func packageURL(_ item: DownloadItem) -> URL? {
-        guard let p = item.packagePath else { return nil }
-        let url = p.hasPrefix("/") ? URL(fileURLWithPath: p)
-            : URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(p)
-        return FileManager.default.fileExists(atPath: url.path) ? url : nil
-    }
-
     private func launch(_ item: DownloadItem) {
         switch item.kind {
         case .file:
@@ -165,22 +179,7 @@ final class DownloadManager: NSObject, ObservableObject {
             tasks[item.id] = task
             task.resume()
         case .hls:
-            var options: [String: Any] = ["AVURLAssetHTTPHeaderFieldsKey": item.headers]
-            if let ua = item.headers["User-Agent"] {
-                options[AVURLAssetHTTPUserAgentKey] = ua
-            }
-            let asset = AVURLAsset(url: item.sourceURL, options: options)
-            let name = item.title.isEmpty ? "Video" : String(item.title.prefix(60))
-            guard let task = hlsSession.makeAssetDownloadTask(
-                asset: asset, assetTitle: name, assetArtworkData: nil,
-                options: [AVAssetDownloadTaskMinimumRequiredMediaBitrateKey: item.hlsBitrate ?? 100_000_000]
-            ) else {
-                fail(item.id, "Akış indirmesi başlatılamadı")
-                return
-            }
-            task.taskDescription = item.id.uuidString
-            tasks[item.id] = task
-            task.resume()
+            startHLS(item)
         }
     }
 
@@ -199,6 +198,7 @@ final class DownloadManager: NSObject, ObservableObject {
             $0.errorMessage = nil
         }
         save()
+        refreshActivity()
         let auto = UserDefaults.standard.object(forKey: "autoSavePhotos") as? Bool ?? true
         if auto, let item = item(id), let url = fileURL(item),
            ["mp4", "mov", "m4v"].contains(url.pathExtension.lowercased()) {
@@ -206,7 +206,6 @@ final class DownloadManager: NSObject, ObservableObject {
         }
     }
 
-    /// Ana kuyruğu boğmamak için ilerleme güncellemelerini seyreltir.
     private func shouldTick(_ id: UUID) -> Bool {
         let now = Date()
         if let last = lastTick[id], now.timeIntervalSince(last) < 0.3 { return false }
@@ -246,117 +245,118 @@ final class DownloadManager: NSObject, ObservableObject {
         return "mp4"
     }
 
-    /// Uygulama kapanıp açıldığında arka planda süren görevleri yeniden eşleştirir.
-    private func reconnect() {
-        let group = DispatchGroup()
-        var live = Set<UUID>()
-        for session in [fileSession!, hlsSession! as URLSession] {
-            group.enter()
-            session.getAllTasks { all in
-                DispatchQueue.main.async {
-                    for t in all {
-                        if let d = t.taskDescription, let id = UUID(uuidString: d) {
-                            live.insert(id)
-                            self.tasks[id] = t
-                        }
-                    }
-                    group.leave()
-                }
+    /// Bir dosyayı İndirilenler klasörüne güzel bir adla taşır ve kaydı tamamlar.
+    private func store(_ id: UUID, from temp: URL, ext: String) {
+        let title = item(id)?.title ?? "video"
+        let dest = uniqueURL(base: title, ext: ext)
+        do {
+            try FileManager.default.moveItem(at: temp, to: dest)
+            update(id) {
+                $0.fileName = dest.lastPathComponent
+                $0.receivedBytes = Int64((try? dest.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
             }
+            reservedNames.remove(dest.lastPathComponent)
+            finish(id)
+        } catch {
+            reservedNames.remove(dest.lastPathComponent)
+            fail(id, "Dosya kaydedilemedi: \(error.localizedDescription)")
         }
-        group.notify(queue: .main) {
-            for item in self.items {
-                if item.state == .downloading, !live.contains(item.id) {
-                    self.update(item.id) {
-                        $0.state = .failed
-                        $0.errorMessage = "İndirme yarıda kaldı"
+    }
+
+    /// Uygulama kapanıp açıldığında arka planda süren dosya indirmelerini yeniden eşleştirir.
+    private func reconnect() {
+        fileSession.getAllTasks { all in
+            DispatchQueue.main.async {
+                var live = Set<UUID>()
+                for t in all {
+                    if let d = t.taskDescription, let id = UUID(uuidString: d) {
+                        live.insert(id)
+                        self.tasks[id] = t
                     }
-                } else if item.state == .converting {
-                    if let pkg = self.packageURL(item) {
-                        self.convert(item.id, package: pkg)
-                    } else {
+                }
+                for item in self.items where item.state == .downloading || item.state == .converting {
+                    if item.kind == .hls || !live.contains(item.id) {
                         self.update(item.id) {
                             $0.state = .failed
-                            $0.errorMessage = "Dönüştürme yarıda kaldı"
+                            $0.errorMessage = "İndirme yarıda kaldı. Tekrar denemek için basılı tutun."
                         }
                     }
                 }
-            }
-            self.save()
-        }
-    }
-
-    // MARK: - HLS → MP4
-
-    private func convert(_ id: UUID, package: URL) {
-        update(id) {
-            $0.state = .converting
-            $0.progress = 1
-        }
-        save()
-        guard let item = item(id) else { return }
-        let asset = AVURLAsset(url: package)
-        export(asset: asset, title: item.title,
-               presets: [AVAssetExportPresetPassthrough, AVAssetExportPresetHighestQuality]) { result in
-            DispatchQueue.main.async {
-                switch result {
-                case .success(let url):
-                    try? FileManager.default.removeItem(at: package)
-                    self.update(id) {
-                        $0.fileName = url.lastPathComponent
-                        $0.packagePath = nil
-                    }
-                    self.finish(id)
-                case .failure(let text):
-                    self.fail(id, text.message)
-                }
+                self.save()
             }
         }
     }
 
-    struct ExportError: Error { let message: String }
+    private func cleanTemporary() {
+        let tmp = FileManager.default.temporaryDirectory
+        if let list = try? FileManager.default.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil) {
+            for u in list where u.lastPathComponent.hasPrefix("hls-") && jobs.isEmpty {
+                try? FileManager.default.removeItem(at: u)
+            }
+        }
+    }
 
-    private func export(asset: AVAsset, title: String, presets: [String],
-                        completion: @escaping (Result<URL, ExportError>) -> Void) {
-        guard let preset = presets.first else {
-            completion(.failure(ExportError(message: "Video MP4'e dönüştürülemedi")))
-            return
+    /// Akış indirilirken ekranın kilitlenmesini engeller; uygulama arka plana geçerse kısa süre daha çalışır.
+    private func refreshActivity() {
+        let active = !jobs.isEmpty
+        UIApplication.shared.isIdleTimerDisabled = active
+        if active, backgroundTask == .invalid {
+            backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "indir.hls") { [weak self] in
+                guard let self else { return }
+                UIApplication.shared.endBackgroundTask(self.backgroundTask)
+                self.backgroundTask = .invalid
+            }
+        } else if !active, backgroundTask != .invalid {
+            UIApplication.shared.endBackgroundTask(backgroundTask)
+            backgroundTask = .invalid
         }
-        let rest = Array(presets.dropFirst())
-        guard let session = AVAssetExportSession(asset: asset, presetName: preset) else {
-            export(asset: asset, title: title, presets: rest, completion: completion)
-            return
-        }
-        let type: AVFileType
-        if session.supportedFileTypes.contains(.mp4) {
-            type = .mp4
-        } else if session.supportedFileTypes.contains(.mov) {
-            type = .mov
-        } else {
-            export(asset: asset, title: title, presets: rest, completion: completion)
-            return
-        }
-        let dest = uniqueURL(base: title, ext: type == .mp4 ? "mp4" : "mov")
-        try? FileManager.default.removeItem(at: dest)
-        session.outputURL = dest
-        session.outputFileType = type
-        session.shouldOptimizeForNetworkUse = true
-        session.exportAsynchronously {
+    }
+
+    // MARK: - HLS
+
+    private func startHLS(_ item: DownloadItem) {
+        let id = item.id
+        let work = FileManager.default.temporaryDirectory.appendingPathComponent("hls-\(id.uuidString)")
+        let downloader = HLSDownloader(source: item.sourceURL, bitrate: item.hlsBitrate,
+                                       headers: item.headers, workDir: work)
+        downloader.onProgress = { [weak self] p in
             DispatchQueue.main.async {
-                self.reservedNames.remove(dest.lastPathComponent)
-                if session.status == .completed {
-                    completion(.success(dest))
-                } else {
-                    try? FileManager.default.removeItem(at: dest)
-                    if rest.isEmpty {
-                        let reason = session.error?.localizedDescription ?? "bilinmeyen hata"
-                        completion(.failure(ExportError(message: "Dönüştürülemedi: \(reason)")))
-                    } else {
-                        self.export(asset: asset, title: title, presets: rest, completion: completion)
-                    }
+                guard let self, self.shouldTick(id) || p >= 1 else { return }
+                self.update(id) { $0.progress = p }
+            }
+        }
+        downloader.onConverting = { [weak self] in
+            DispatchQueue.main.async {
+                guard let self, self.item(id)?.state == .downloading else { return }
+                self.update(id) {
+                    $0.state = .converting
+                    $0.progress = 1
                 }
             }
         }
+        jobs[id] = Task.detached { [weak self] in
+            do {
+                let out = try await downloader.run()
+                await MainActor.run {
+                    guard let self else { return }
+                    self.jobs[id] = nil
+                    self.store(id, from: out, ext: "mp4")
+                    try? FileManager.default.removeItem(at: work)
+                    self.refreshActivity()
+                }
+            } catch {
+                let text = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                let cancelled = error is CancellationError
+                await MainActor.run {
+                    guard let self else { return }
+                    self.jobs[id] = nil
+                    try? FileManager.default.removeItem(at: work)
+                    if !cancelled { self.fail(id, text) }
+                    self.refreshActivity()
+                }
+            }
+        }
+        refreshActivity()
     }
 
     // MARK: - Kayıt
@@ -372,6 +372,53 @@ final class DownloadManager: NSObject, ObservableObject {
         if let data = try? JSONEncoder().encode(items) {
             try? data.write(to: Self.indexURL, options: .atomic)
         }
+    }
+
+    // MARK: - Yedek indirme (arka plan oturumu reddedilirse)
+
+    private func fallbackDownload(_ id: UUID) {
+        guard let item = item(id) else { return }
+        update(id) {
+            $0.state = .downloading
+            $0.errorMessage = nil
+            $0.progress = 0
+        }
+        var req = URLRequest(url: item.sourceURL, timeoutInterval: 60)
+        for (k, v) in item.headers { req.setValue(v, forHTTPHeaderField: k) }
+        jobs[id] = Task.detached { [weak self] in
+            do {
+                let (temp, resp) = try await URLSession.shared.download(for: req)
+                let http = resp as? HTTPURLResponse
+                let ok = (200..<300).contains(http?.statusCode ?? 200)
+                    && !(resp.mimeType ?? "").lowercased().hasPrefix("text/html")
+                let ext = DownloadManager.fileExtension(response: resp, url: item.sourceURL)
+                // Geçici dosya bu blok bitince silinebileceği için hemen taşı
+                let keep = FileManager.default.temporaryDirectory.appendingPathComponent("dl-\(id.uuidString).\(ext)")
+                try? FileManager.default.removeItem(at: keep)
+                try FileManager.default.moveItem(at: temp, to: keep)
+                await MainActor.run {
+                    guard let self else { return }
+                    self.jobs[id] = nil
+                    if ok {
+                        self.store(id, from: keep, ext: ext)
+                    } else {
+                        try? FileManager.default.removeItem(at: keep)
+                        self.fail(id, "Site bu videonun indirilmesine izin vermiyor (\(http?.statusCode ?? 0)). Videoyu oynatıp yeniden deneyin.")
+                    }
+                    self.refreshActivity()
+                }
+            } catch {
+                let text = error.localizedDescription
+                let cancelled = error is CancellationError || (error as NSError).code == NSURLErrorCancelled
+                await MainActor.run {
+                    guard let self else { return }
+                    self.jobs[id] = nil
+                    if !cancelled { self.fail(id, text) }
+                    self.refreshActivity()
+                }
+            }
+        }
+        refreshActivity()
     }
 }
 
@@ -396,69 +443,37 @@ extension DownloadManager: URLSessionDownloadDelegate {
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         guard let id = downloadTask.itemID else { return }
         if let http = downloadTask.response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            pendingErrors[id] = "Sunucu indirmeyi reddetti (\(http.statusCode))"
+            if [401, 403, 410].contains(http.statusCode) {
+                needsFallback.insert(id)
+            } else {
+                pendingErrors[id] = "Sunucu indirmeyi reddetti (\(http.statusCode))"
+            }
             return
         }
         if let mime = downloadTask.response?.mimeType?.lowercased(), mime.hasPrefix("text/html") {
             pendingErrors[id] = "Video yerine web sayfası geldi; bu site doğrudan indirmeye izin vermiyor"
             return
         }
-        let title = item(id)?.title ?? "video"
         let ext = Self.fileExtension(response: downloadTask.response, url: downloadTask.originalRequest?.url)
-        let dest = uniqueURL(base: title, ext: ext)
+        // Konum bu metot dönünce silinir; hemen geçici bir yere taşı
+        let keep = FileManager.default.temporaryDirectory.appendingPathComponent("dl-\(id.uuidString).\(ext)")
+        try? FileManager.default.removeItem(at: keep)
         do {
-            try FileManager.default.moveItem(at: location, to: dest)
-            update(id) {
-                $0.fileName = dest.lastPathComponent
-                $0.receivedBytes = Int64((try? dest.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
-            }
+            try FileManager.default.moveItem(at: location, to: keep)
+            pendingFiles[id] = (keep, ext)
         } catch {
             pendingErrors[id] = "Dosya kaydedilemedi: \(error.localizedDescription)"
         }
-        reservedNames.remove(dest.lastPathComponent)
-    }
-
-    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
-        if let ident = session.configuration.identifier,
-           let handler = backgroundCompletionHandlers.removeValue(forKey: ident) {
-            handler()
-        }
-    }
-}
-
-// MARK: - HLS delegesi ve ortak tamamlanma
-
-extension DownloadManager: AVAssetDownloadDelegate {
-    func urlSession(_ session: URLSession, assetDownloadTask: AVAssetDownloadTask, didLoad timeRange: CMTimeRange,
-                    totalTimeRangesLoaded loadedTimeRanges: [NSValue], timeRangeExpectedToLoad: CMTimeRange) {
-        guard let id = assetDownloadTask.itemID, shouldTick(id) else { return }
-        var loaded = 0.0
-        for v in loadedTimeRanges { loaded += CMTimeGetSeconds(v.timeRangeValue.duration) }
-        let total = CMTimeGetSeconds(timeRangeExpectedToLoad.duration)
-        update(id) { $0.progress = total > 0 ? min(1, loaded / total) : 0 }
-    }
-
-    func urlSession(_ session: URLSession, assetDownloadTask: AVAssetDownloadTask, didFinishDownloadingTo location: URL) {
-        guard let id = assetDownloadTask.itemID else { return }
-        // Uygulama kabının yolu güncellemelerde değişebildiği için ana dizine göre göreli sakla.
-        let home = NSHomeDirectory()
-        var path = location.path
-        if path.hasPrefix(home + "/") { path = String(path.dropFirst(home.count + 1)) }
-        update(id) { $0.packagePath = path }
-        save()
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let id = task.itemID else { return }
         tasks[id] = nil
         lastTick[id] = nil
-        let isHLS = task is AVAssetDownloadTask
 
         if let error = error as NSError? {
             pendingErrors[id] = nil
-            if isHLS, let item = item(id), let pkg = packageURL(item) {
-                try? FileManager.default.removeItem(at: pkg)
-            }
+            needsFallback.remove(id)
             if error.code == NSURLErrorCancelled {
                 if item(id)?.state == .downloading { fail(id, "İptal edildi") }
             } else {
@@ -466,18 +481,25 @@ extension DownloadManager: AVAssetDownloadDelegate {
             }
             return
         }
+        if needsFallback.remove(id) != nil {
+            fallbackDownload(id)
+            return
+        }
         if let text = pendingErrors.removeValue(forKey: id) {
             fail(id, text)
             return
         }
-        if isHLS {
-            guard let item = item(id), let pkg = packageURL(item) else {
-                fail(id, "İndirilen akış bulunamadı")
-                return
-            }
-            convert(id, package: pkg)
+        if let file = pendingFiles.removeValue(forKey: id) {
+            store(id, from: file.url, ext: file.ext)
         } else {
-            finish(id)
+            fail(id, "İndirilen dosya bulunamadı")
+        }
+    }
+
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        if let ident = session.configuration.identifier,
+           let handler = backgroundCompletionHandlers.removeValue(forKey: ident) {
+            handler()
         }
     }
 }

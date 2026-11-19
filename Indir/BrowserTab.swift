@@ -7,6 +7,7 @@ import Combine
 final class BrowserTab: NSObject, ObservableObject, Identifiable {
     let id = UUID()
     let webView: WKWebView
+    let isPrivate: Bool
     weak var owner: BrowserModel?
 
     @Published var currentURL: URL?
@@ -39,11 +40,13 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
         return displayURL?.host ?? "Yeni sekme"
     }
 
-    override init() {
+    init(isPrivate: Bool = false) {
+        self.isPrivate = isPrivate
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = .all
-        config.websiteDataStore = .default()
+        // Gizli sekme: çerez, önbellek ve site verileri yalnızca bellekte tutulur, kapanınca silinir
+        config.websiteDataStore = isPrivate ? .nonPersistent() : .default()
         let controller = WKUserContentController()
         controller.addUserScript(WKUserScript(source: DetectorScript.source,
                                               injectionTime: .atDocumentStart,
@@ -107,7 +110,8 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
         let gen = generation
         Task { @MainActor in
             defer { if gen == self.generation { self.checking = max(0, self.checking - 1) } }
-            let headers = await owner.headers(url: url, page: page)
+            let headers = await owner.headers(url: url, page: page,
+                                              store: self.webView.configuration.websiteDataStore)
             if isHLS {
                 guard let variants = await MediaProbe.resolveHLS(url, headers: headers),
                       gen == self.generation else { return }
@@ -182,7 +186,7 @@ extension BrowserTab: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        if let url = webView.url { owner?.recordVisit(url: url, title: webView.title ?? "") }
+        if !isPrivate, let url = webView.url { owner?.recordVisit(url: url, title: webView.title ?? "") }
         owner?.saveSession()
     }
 
@@ -231,7 +235,7 @@ extension BrowserTab: WKUIDelegate {
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         if navigationAction.targetFrame == nil, navigationAction.navigationType == .linkActivated,
            let url = navigationAction.request.url {
-            owner?.newTab(url: url)
+            owner?.newTab(url: url, isPrivate: isPrivate)
         }
         return nil
     }
