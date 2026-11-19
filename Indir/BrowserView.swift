@@ -9,7 +9,23 @@ struct WebViewContainer: UIViewRepresentable {
 
 struct BrowserView: View {
     @EnvironmentObject var browser: BrowserModel
-    @EnvironmentObject var downloads: DownloadManager
+
+    var body: some View {
+        BrowserContent(tab: browser.current)
+            .id(browser.currentID)
+            .overlay(alignment: .top) { ToastView() }
+            .sheet(isPresented: $browser.showTabs) {
+                TabsView().environmentObject(browser)
+            }
+            .sheet(isPresented: $browser.showHistory) {
+                HistoryView().environmentObject(browser)
+            }
+    }
+}
+
+struct BrowserContent: View {
+    @EnvironmentObject var browser: BrowserModel
+    @ObservedObject var tab: BrowserTab
     @State private var address = ""
     @FocusState private var addressFocused: Bool
 
@@ -17,8 +33,8 @@ struct BrowserView: View {
         VStack(spacing: 0) {
             addressBar
             ZStack(alignment: .bottomTrailing) {
-                WebViewContainer(webView: browser.webView)
-                if browser.showStart {
+                WebViewContainer(webView: tab.webView)
+                if tab.showStart {
                     StartPage { open($0) }
                         .transition(.opacity)
                 } else {
@@ -27,18 +43,16 @@ struct BrowserView: View {
             }
             bottomBar
         }
-        .overlay(alignment: .top) { toastView }
-        .sheet(isPresented: $browser.showMediaSheet) {
-            MediaSheet()
-                .environmentObject(browser)
-                .environmentObject(downloads)
+        .sheet(isPresented: $tab.showMediaSheet) {
+            MediaSheet(tab: tab).environmentObject(browser)
         }
-        .onChange(of: browser.currentURL) { url in
-            if !addressFocused { address = url?.absoluteString ?? "" }
-        }
-        .onChange(of: browser.showStart) { start in
-            if start { address = "" } else if !addressFocused { address = browser.currentURL?.absoluteString ?? "" }
-        }
+        .onAppear { syncAddress() }
+        .onChange(of: tab.currentURL) { _ in if !addressFocused { syncAddress() } }
+        .onChange(of: tab.showStart) { _ in if !addressFocused { syncAddress() } }
+    }
+
+    private func syncAddress() {
+        address = tab.showStart ? "" : (tab.displayURL?.absoluteString ?? "")
     }
 
     private func open(_ text: String) {
@@ -73,24 +87,24 @@ struct BrowserView: View {
                 if addressFocused {
                     Button("Vazgeç") {
                         addressFocused = false
-                        address = browser.showStart ? "" : (browser.currentURL?.absoluteString ?? "")
+                        syncAddress()
                     }
-                } else if !browser.showStart {
+                } else if !tab.showStart {
                     Button {
-                        browser.isLoading ? browser.stop() : browser.reload()
+                        if tab.isLoading { tab.webView.stopLoading() } else { tab.webView.reload() }
                     } label: {
-                        Image(systemName: browser.isLoading ? "xmark" : "arrow.clockwise")
+                        Image(systemName: tab.isLoading ? "xmark" : "arrow.clockwise")
                     }
                 }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
 
-            ProgressView(value: browser.progress)
+            ProgressView(value: tab.progress)
                 .progressViewStyle(.linear)
                 .tint(Theme.accent)
                 .frame(height: 2)
-                .opacity(browser.isLoading && !browser.showStart ? 1 : 0)
+                .opacity(tab.isLoading && !tab.showStart ? 1 : 0)
         }
         .background(Color(.systemBackground))
     }
@@ -99,21 +113,29 @@ struct BrowserView: View {
 
     private var detectButton: some View {
         Button {
-            if browser.media.isEmpty {
-                browser.flash("Henüz video bulunamadı. Videoyu oynatmayı deneyin.")
+            if !tab.media.isEmpty {
+                tab.showMediaSheet = true
+            } else if tab.checking > 0 {
+                browser.flash("Videolar kontrol ediliyor…")
             } else {
-                browser.showMediaSheet = true
+                browser.flash("Henüz video bulunamadı. Videoyu oynatmayı deneyin.")
             }
         } label: {
             ZStack(alignment: .topTrailing) {
-                Image(systemName: "arrow.down.to.line")
-                    .font(.title2.weight(.bold))
-                    .foregroundColor(.white)
-                    .frame(width: 60, height: 60)
-                    .background(Circle().fill(browser.media.isEmpty ? Color.gray.opacity(0.8) : Theme.accent))
-                    .shadow(color: .black.opacity(0.25), radius: 6, y: 3)
-                if !browser.media.isEmpty {
-                    Text("\(browser.media.count)")
+                ZStack {
+                    Circle().fill(tab.media.isEmpty ? Color.gray.opacity(0.8) : Theme.accent)
+                    if tab.media.isEmpty && tab.checking > 0 {
+                        ProgressView().tint(.white)
+                    } else {
+                        Image(systemName: "arrow.down.to.line")
+                            .font(.title2.weight(.bold))
+                            .foregroundColor(.white)
+                    }
+                }
+                .frame(width: 60, height: 60)
+                .shadow(color: .black.opacity(0.25), radius: 6, y: 3)
+                if !tab.media.isEmpty {
+                    Text("\(tab.media.count)")
                         .font(.caption.bold())
                         .foregroundColor(Theme.accent)
                         .frame(minWidth: 22, minHeight: 22)
@@ -122,23 +144,55 @@ struct BrowserView: View {
                 }
             }
         }
-        .animation(.spring(), value: browser.media.count)
+        .animation(.spring(), value: tab.media.count)
     }
 
     // MARK: Alt çubuk
 
     private var bottomBar: some View {
         HStack {
-            barButton("chevron.left", enabled: browser.canGoBack) { browser.goBack() }
-            barButton("chevron.right", enabled: browser.canGoForward) { browser.goForward() }
-            barButton("house", enabled: !browser.showStart) { browser.goHome() }
-            barButton("star", enabled: !browser.showStart) { browser.addCurrentBookmark() }
-            if let url = browser.currentURL, !browser.showStart {
-                ShareLink(item: url) {
-                    Image(systemName: "square.and.arrow.up").font(.title3).frame(maxWidth: .infinity)
+            barButton("chevron.left", enabled: tab.canGoBack) { tab.goBack() }
+            barButton("chevron.right", enabled: tab.canGoForward) { tab.goForward() }
+            barButton("house", enabled: !tab.showStart) { tab.goHome() }
+
+            Button {
+                tab.captureSnapshot()
+                browser.showTabs = true
+            } label: {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(lineWidth: 1.8)
+                        .frame(width: 23, height: 23)
+                    Text("\(browser.tabs.count)")
+                        .font(.caption2.bold())
                 }
-            } else {
-                barButton("square.and.arrow.up", enabled: false) {}
+                .frame(maxWidth: .infinity)
+            }
+
+            Menu {
+                Button { browser.newTab() } label: {
+                    Label("Yeni sekme", systemImage: "plus.square.on.square")
+                }
+                Button { browser.showHistory = true } label: {
+                    Label("Geçmiş", systemImage: "clock.arrow.circlepath")
+                }
+                if !tab.showStart, let url = tab.currentURL {
+                    Divider()
+                    Button { browser.addBookmark(tab) } label: {
+                        Label("Kısayollara ekle", systemImage: "star")
+                    }
+                    ShareLink(item: url) {
+                        Label("Paylaş", systemImage: "square.and.arrow.up")
+                    }
+                    Button {
+                        UIPasteboard.general.string = url.absoluteString
+                        browser.flash("Bağlantı kopyalandı")
+                    } label: {
+                        Label("Bağlantıyı kopyala", systemImage: "doc.on.doc")
+                    }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle").font(.title3).frame(maxWidth: .infinity)
             }
         }
         .padding(.vertical, 8)
@@ -151,10 +205,14 @@ struct BrowserView: View {
         }
         .disabled(!enabled)
     }
+}
 
-    // MARK: Bildirim
+// MARK: - Bildirim
 
-    @ViewBuilder private var toastView: some View {
+struct ToastView: View {
+    @EnvironmentObject var browser: BrowserModel
+
+    var body: some View {
         if let text = browser.toast {
             HStack(spacing: 10) {
                 Text(text).font(.subheadline.weight(.medium)).foregroundColor(.white)
@@ -232,7 +290,7 @@ struct StartPage: View {
                 }
                 .padding(.horizontal, 20)
 
-                Text("Kısayol eklemek için bir sayfadayken ☆ düğmesine dokunun. Silmek için kısayola basılı tutun.")
+                Text("Kısayol eklemek için bir sayfadayken ⋯ menüsünden \"Kısayollara ekle\"ye dokunun. Silmek için kısayola basılı tutun.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -249,33 +307,62 @@ struct StartPage: View {
 
 struct MediaSheet: View {
     @EnvironmentObject var browser: BrowserModel
+    @ObservedObject var tab: BrowserTab
     @Environment(\.dismiss) private var dismiss
+
+    private var sameTitle: Bool {
+        Set(tab.media.map { $0.displayName }).count <= 1
+    }
 
     var body: some View {
         NavigationStack {
             List {
+                if sameTitle, let first = tab.media.first {
+                    Section {
+                        HStack(spacing: 12) {
+                            Image(systemName: "play.rectangle.fill")
+                                .font(.title)
+                                .foregroundColor(Theme.accent)
+                            Text(first.displayName)
+                                .font(.headline)
+                                .lineLimit(3)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
                 Section {
-                    ForEach(browser.media) { m in
-                        MediaRow(media: m) {
+                    ForEach(tab.media) { m in
+                        Button {
                             browser.download(m)
                             dismiss()
+                        } label: {
+                            MediaRow(media: m, showTitle: !sameTitle)
+                        }
+                        .contextMenu {
+                            Button { UIPasteboard.general.string = m.url.absoluteString } label: {
+                                Label("Bağlantıyı kopyala", systemImage: "doc.on.doc")
+                            }
                         }
                     }
+                    if tab.checking > 0 {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                            Text("Diğer seçenekler kontrol ediliyor…")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                } header: {
+                    Text("Kalite seçin")
                 } footer: {
-                    Text("Birden fazla seçenek varsa genellikle boyutu en büyük olan en yüksek kalitedir. Bağlantıyı kopyalamak için satıra basılı tutun.")
+                    Text("~ işaretli boyutlar tahminidir. Akış olarak yayınlanan videolar indirildikten sonra MP4'e çevrilir.")
                 }
             }
-            .navigationTitle("Bulunan videolar")
+            .navigationTitle("Videoyu indir")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Kapat") { dismiss() }
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    Button("Temizle") {
-                        browser.media.removeAll()
-                        dismiss()
-                    }
                 }
             }
         }
@@ -284,48 +371,36 @@ struct MediaSheet: View {
 }
 
 struct MediaRow: View {
-    @EnvironmentObject var browser: BrowserModel
     let media: DetectedMedia
-    let onDownload: () -> Void
-    @State private var size: Int64?
+    let showTitle: Bool
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: media.kind == .hls ? "dot.radiowaves.left.and.right" : "film")
-                .font(.title3)
-                .foregroundColor(Theme.accent)
-                .frame(width: 32)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(media.displayName)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(2)
-                HStack(spacing: 6) {
-                    Text(media.formatLabel)
-                    if let size {
-                        Text("· " + ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
-                    }
-                    Text("· " + (media.url.host ?? ""))
+            Text(media.qualityBadge)
+                .font(.subheadline.bold())
+                .foregroundColor(.white)
+                .frame(width: 62, height: 38)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.accent))
+            VStack(alignment: .leading, spacing: 2) {
+                if showTitle {
+                    Text(media.displayName)
+                        .font(.subheadline)
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
                 }
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .lineLimit(1)
+                Text(media.detailLabel)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
             }
             Spacer(minLength: 4)
-            Button(action: onDownload) {
-                Image(systemName: "arrow.down.circle.fill")
-                    .font(.system(size: 30))
-                    .foregroundColor(Theme.accent)
-            }
-            .buttonStyle(.borderless)
+            Text(media.sizeLabel ?? "Boyut ?")
+                .font(.subheadline.weight(.semibold))
+                .foregroundColor(media.sizeLabel == nil ? .secondary : .primary)
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.system(size: 28))
+                .foregroundColor(Theme.accent)
         }
         .padding(.vertical, 4)
-        .contextMenu {
-            Button { UIPasteboard.general.string = media.url.absoluteString } label: {
-                Label("Bağlantıyı kopyala", systemImage: "doc.on.doc")
-            }
-        }
-        .task {
-            if media.kind == .file { size = await browser.contentLength(media) }
-        }
     }
 }

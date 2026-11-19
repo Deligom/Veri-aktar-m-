@@ -55,8 +55,10 @@ final class DownloadManager: NSObject, ObservableObject {
 
     // MARK: - Genel işlemler
 
-    func start(url: URL, title: String, pageURL: URL?, kind: MediaKind, headers: [String: String]) {
-        let item = DownloadItem(title: title, sourceURL: url, pageURL: pageURL, kind: kind, headers: headers)
+    func start(url: URL, title: String, pageURL: URL?, kind: MediaKind, headers: [String: String],
+               hlsBitrate: Double? = nil) {
+        var item = DownloadItem(title: title, sourceURL: url, pageURL: pageURL, kind: kind, headers: headers)
+        item.hlsBitrate = hlsBitrate
         items.insert(item, at: 0)
         launch(item)
         save()
@@ -171,7 +173,7 @@ final class DownloadManager: NSObject, ObservableObject {
             let name = item.title.isEmpty ? "Video" : String(item.title.prefix(60))
             guard let task = hlsSession.makeAssetDownloadTask(
                 asset: asset, assetTitle: name, assetArtworkData: nil,
-                options: [AVAssetDownloadTaskMinimumRequiredMediaBitrateKey: 100_000_000]
+                options: [AVAssetDownloadTaskMinimumRequiredMediaBitrateKey: item.hlsBitrate ?? 100_000_000]
             ) else {
                 fail(item.id, "Akış indirmesi başlatılamadı")
                 return

@@ -6,17 +6,21 @@ enum Theme {
 
 enum MediaKind: String, Codable {
     case file   // doğrudan dosya (mp4, mov, webm...)
-    case hls    // akış (m3u8)
+    case hls    // akış (m3u8), indirilince MP4'e çevrilir
 }
 
-/// Tarayıcıda yakalanan bir video adresi.
+/// Kontrol edilmiş, indirilebilir bir video seçeneği.
 struct DetectedMedia: Identifiable, Hashable {
-    var id: String { url.absoluteString }
+    let id = UUID()
     let url: URL
     let kind: MediaKind
     var title: String
     var pageURL: URL?
-    var foundAt = Date()
+    var height: Int = 0
+    var size: Int64?
+    var sizeIsEstimate = false
+    var hlsBitrate: Double?
+    var ext = "MP4"
 
     var displayName: String {
         let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -25,10 +29,19 @@ struct DetectedMedia: Identifiable, Hashable {
         return last.isEmpty ? (url.host ?? "Video") : last
     }
 
-    var formatLabel: String {
-        if kind == .hls { return "Akış (HLS)" }
-        let ext = url.pathExtension.uppercased()
-        return ext.isEmpty ? "Video" : ext
+    var qualityBadge: String {
+        if height >= 2160 { return "4K" }
+        if height > 0 { return "\(height)p" }
+        return ext
+    }
+
+    var detailLabel: String {
+        [ext, url.host ?? ""].filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
+    var sizeLabel: String? {
+        guard let size, size > 0 else { return nil }
+        return (sizeIsEstimate ? "~" : "") + ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
     }
 }
 
@@ -36,6 +49,13 @@ struct Bookmark: Codable, Identifiable, Hashable {
     var id = UUID()
     var title: String
     var url: String
+}
+
+struct HistoryEntry: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var title: String
+    var url: String
+    var date: Date
 }
 
 enum DownloadState: String, Codable {
@@ -49,6 +69,7 @@ struct DownloadItem: Codable, Identifiable, Equatable {
     var pageURL: URL?
     var kind: MediaKind
     var headers: [String: String] = [:]
+    var hlsBitrate: Double?
     var fileName: String?
     var packagePath: String?
     var state: DownloadState = .downloading

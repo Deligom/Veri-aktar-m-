@@ -1,68 +1,131 @@
 import SwiftUI
 import WebKit
-import Combine
 
-/// WKWebView'ı yöneten, sayfadaki videoları toplayan model.
+/// Sekmeleri, kısayolları, geçmişi ve indirme başlatmayı yöneten model.
 @MainActor
-final class BrowserModel: NSObject, ObservableObject {
-    let webView: WKWebView
-
-    @Published var currentURL: URL?
-    @Published var title = ""
-    @Published var progress: Double = 0
-    @Published var isLoading = false
-    @Published var canGoBack = false
-    @Published var canGoForward = false
-
-    @Published var media: [DetectedMedia] = []
-    @Published var showMediaSheet = false
-    @Published var showStart = true
+final class BrowserModel: ObservableObject {
+    @Published private(set) var tabs: [BrowserTab] = []
+    @Published var currentID = UUID()
     @Published var toast: String?
-
+    @Published var showTabs = false
+    @Published var showHistory = false
+    @Published private(set) var history: [HistoryEntry] = []
     @Published var bookmarks: [Bookmark] = [] {
         didSet { saveBookmarks() }
     }
 
     private var userAgent: String?
     private static let bookmarksKey = "bookmarks.v1"
+    private static let sessionKey = "session.v1"
 
-    override init() {
-        let config = WKWebViewConfiguration()
-        config.allowsInlineMediaPlayback = true
-        config.mediaTypesRequiringUserActionForPlayback = .all
-        let controller = WKUserContentController()
-        controller.addUserScript(WKUserScript(source: DetectorScript.source,
-                                              injectionTime: .atDocumentStart,
-                                              forMainFrameOnly: false))
-        config.userContentController = controller
-        webView = WKWebView(frame: .zero, configuration: config)
-        super.init()
-
-        controller.add(WeakScriptHandler(self), name: "indir")
-        webView.navigationDelegate = self
-        webView.uiDelegate = self
-        webView.allowsBackForwardNavigationGestures = true
-
-        webView.publisher(for: \.url).assign(to: &$currentURL)
-        webView.publisher(for: \.title).map { $0 ?? "" }.assign(to: &$title)
-        webView.publisher(for: \.estimatedProgress).assign(to: &$progress)
-        webView.publisher(for: \.isLoading).assign(to: &$isLoading)
-        webView.publisher(for: \.canGoBack).assign(to: &$canGoBack)
-        webView.publisher(for: \.canGoForward).assign(to: &$canGoForward)
-
-        webView.evaluateJavaScript("navigator.userAgent") { [weak self] result, _ in
-            self?.userAgent = result as? String
-        }
-        loadBookmarks()
+    private static var historyURL: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("history.json")
     }
 
-    // MARK: - Gezinme
+    var current: BrowserTab {
+        tabs.first { $0.id == currentID } ?? tabs[0]
+    }
+
+    init() {
+        loadBookmarks()
+        loadHistory()
+        restoreSession()
+        if tabs.isEmpty {
+            let t = makeTab()
+            tabs = [t]
+            currentID = t.id
+        }
+        current.activate()
+        current.webView.evaluateJavaScript("navigator.userAgent") { [weak self] result, _ in
+            self?.userAgent = result as? String
+        }
+    }
+
+    // MARK: Sekmeler
+
+    private func makeTab() -> BrowserTab {
+        let t = BrowserTab()
+        t.owner = self
+        return t
+    }
+
+    @discardableResult
+    func newTab(url: URL? = nil) -> BrowserTab {
+        current.captureSnapshot()
+        let t = makeTab()
+        if let i = tabs.firstIndex(where: { $0.id == currentID }) {
+            tabs.insert(t, at: i + 1)
+        } else {
+            tabs.append(t)
+        }
+        if let url { t.load(url) }
+        currentID = t.id
+        saveSession()
+        return t
+    }
+
+    func select(_ t: BrowserTab) {
+        currentID = t.id
+        t.activate()
+        saveSession()
+    }
+
+    func close(_ t: BrowserTab) {
+        guard let i = tabs.firstIndex(where: { $0.id == t.id }) else { return }
+        t.webView.stopLoading()
+        tabs.remove(at: i)
+        if tabs.isEmpty {
+            let n = makeTab()
+            tabs = [n]
+            currentID = n.id
+        } else if currentID == t.id {
+            currentID = tabs[min(i, tabs.count - 1)].id
+            current.activate()
+        }
+        saveSession()
+    }
+
+    func closeAll() {
+        for t in tabs { t.webView.stopLoading() }
+        let n = makeTab()
+        tabs = [n]
+        currentID = n.id
+        saveSession()
+    }
+
+    func saveSession() {
+        let list: [[String: String]] = tabs.compactMap { t in
+            guard !t.showStart || t.pendingURL != nil, let url = t.displayURL else { return nil }
+            return ["url": url.absoluteString, "title": t.displayTitle]
+        }
+        let index = tabs.filter { !$0.showStart || $0.pendingURL != nil }
+            .firstIndex { $0.id == currentID } ?? 0
+        UserDefaults.standard.set(["tabs": list, "index": index] as [String: Any], forKey: Self.sessionKey)
+    }
+
+    private func restoreSession() {
+        guard let dict = UserDefaults.standard.dictionary(forKey: Self.sessionKey),
+              let list = dict["tabs"] as? [[String: String]], !list.isEmpty else { return }
+        for entry in list.prefix(20) {
+            guard let s = entry["url"], let url = URL(string: s) else { continue }
+            let t = makeTab()
+            t.pendingURL = url
+            t.restoredTitle = entry["title"]
+            t.showStart = false
+            tabs.append(t)
+        }
+        let index = dict["index"] as? Int ?? 0
+        if !tabs.isEmpty { currentID = tabs[min(max(0, index), tabs.count - 1)].id }
+    }
+
+    // MARK: Gezinme
 
     func open(_ input: String) {
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, let url = Self.resolve(text) else { return }
-        showStart = false
-        webView.load(URLRequest(url: url))
+        current.load(url)
     }
 
     static func resolve(_ text: String) -> URL? {
@@ -85,12 +148,6 @@ final class BrowserModel: NSObject, ObservableObject {
         return comps.url
     }
 
-    func goBack() { showStart = false; webView.goBack() }
-    func goForward() { showStart = false; webView.goForward() }
-    func reload() { webView.reload() }
-    func stop() { webView.stopLoading() }
-    func goHome() { showStart = true }
-
     func flash(_ message: String) {
         withAnimation { toast = message }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
@@ -99,7 +156,44 @@ final class BrowserModel: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Yer imleri
+    // MARK: Geçmiş
+
+    func recordVisit(url: URL, title: String) {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return }
+        if let first = history.first, first.url == url.absoluteString {
+            if !title.isEmpty { history[0].title = title }
+            history[0].date = Date()
+        } else {
+            history.insert(HistoryEntry(title: title, url: url.absoluteString, date: Date()), at: 0)
+        }
+        if history.count > 1000 { history.removeLast(history.count - 1000) }
+        saveHistory()
+    }
+
+    func deleteHistory(_ entry: HistoryEntry) {
+        history.removeAll { $0.id == entry.id }
+        saveHistory()
+    }
+
+    func clearHistory() {
+        history.removeAll()
+        saveHistory()
+    }
+
+    private func loadHistory() {
+        if let data = try? Data(contentsOf: Self.historyURL),
+           let list = try? JSONDecoder().decode([HistoryEntry].self, from: data) {
+            history = list
+        }
+    }
+
+    private func saveHistory() {
+        if let data = try? JSONEncoder().encode(history) {
+            try? data.write(to: Self.historyURL, options: .atomic)
+        }
+    }
+
+    // MARK: Kısayollar
 
     private func loadBookmarks() {
         if let data = UserDefaults.standard.data(forKey: Self.bookmarksKey),
@@ -122,13 +216,13 @@ final class BrowserModel: NSObject, ObservableObject {
         }
     }
 
-    func addCurrentBookmark() {
-        guard !showStart, let url = currentURL else { return }
+    func addBookmark(_ tab: BrowserTab) {
+        guard !tab.showStart, let url = tab.currentURL else { return }
         if bookmarks.contains(where: { $0.url == url.absoluteString }) {
             flash("Bu sayfa zaten kısayollarda")
             return
         }
-        let name = title.isEmpty ? (url.host ?? url.absoluteString) : title
+        let name = tab.title.isEmpty ? (url.host ?? url.absoluteString) : tab.title
         bookmarks.append(Bookmark(title: String(name.prefix(30)), url: url.absoluteString))
         flash("Kısayollara eklendi")
     }
@@ -137,20 +231,14 @@ final class BrowserModel: NSObject, ObservableObject {
         bookmarks.removeAll { $0.id == b.id }
     }
 
-    // MARK: - Videolar
+    // MARK: İndirme
 
-    func add(_ m: DetectedMedia) {
-        if media.contains(where: { $0.url == m.url }) { return }
-        media.insert(m, at: 0)
-        if media.count > 40 { media.removeLast(media.count - 40) }
-    }
-
-    func headers(for m: DetectedMedia) async -> [String: String] {
+    func headers(url: URL, page: URL?) async -> [String: String] {
         var h: [String: String] = [:]
         if let ua = userAgent { h["User-Agent"] = ua }
-        if let page = m.pageURL { h["Referer"] = page.absoluteString }
-        let cookies = await webView.configuration.websiteDataStore.httpCookieStore.allCookies()
-        let host = (m.url.host ?? "").lowercased()
+        if let page { h["Referer"] = page.absoluteString }
+        let cookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
+        let host = (url.host ?? "").lowercased()
         let matching = cookies.filter { c in
             var d = c.domain.lowercased()
             if d.hasPrefix(".") { d.removeFirst() }
@@ -162,121 +250,12 @@ final class BrowserModel: NSObject, ObservableObject {
 
     func download(_ m: DetectedMedia) {
         Task { @MainActor in
-            let h = await self.headers(for: m)
-            DownloadManager.shared.start(url: m.url, title: m.displayName, pageURL: m.pageURL,
-                                         kind: m.kind, headers: h)
+            let h = await self.headers(url: m.url, page: m.pageURL)
+            var name = m.displayName
+            if m.height > 0 { name += " (\(m.qualityBadge))" }
+            DownloadManager.shared.start(url: m.url, title: name, pageURL: m.pageURL,
+                                         kind: m.kind, headers: h, hlsBitrate: m.hlsBitrate)
             self.flash("İndirme başladı")
         }
-    }
-
-    /// Dosya boyutunu öğrenmeye çalışır (HEAD, olmazsa 1 baytlık Range isteği).
-    func contentLength(_ m: DetectedMedia) async -> Int64? {
-        let h = await headers(for: m)
-        var req = URLRequest(url: m.url)
-        req.timeoutInterval = 10
-        for (k, v) in h { req.setValue(v, forHTTPHeaderField: k) }
-        req.httpMethod = "HEAD"
-        if let result = try? await URLSession.shared.data(for: req),
-           let http = result.1 as? HTTPURLResponse,
-           (200..<300).contains(http.statusCode),
-           http.expectedContentLength > 0,
-           !(http.mimeType ?? "").hasPrefix("text") {
-            return http.expectedContentLength
-        }
-        req.httpMethod = "GET"
-        req.setValue("bytes=0-0", forHTTPHeaderField: "Range")
-        if let result = try? await URLSession.shared.data(for: req),
-           let http = result.1 as? HTTPURLResponse,
-           let range = http.value(forHTTPHeaderField: "Content-Range"),
-           let total = range.split(separator: "/").last,
-           let n = Int64(total) {
-            return n
-        }
-        return nil
-    }
-}
-
-// MARK: - WebKit delegeleri
-
-extension BrowserModel: WKScriptMessageHandler {
-    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let body = message.body as? [String: Any],
-              let s = body["url"] as? String,
-              let url = URL(string: s),
-              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return }
-        let type = ((body["type"] as? String) ?? "").lowercased()
-        let isHLS = url.path.lowercased().hasSuffix(".m3u8") || type.contains("mpegurl")
-            || url.absoluteString.lowercased().contains(".m3u8")
-        var title = (body["title"] as? String) ?? ""
-        if title.isEmpty { title = webView.title ?? "" }
-        let page = (body["page"] as? String).flatMap { URL(string: $0) } ?? webView.url
-        add(DetectedMedia(url: url, kind: isHLS ? .hls : .file, title: title, pageURL: page))
-    }
-}
-
-extension BrowserModel: WKNavigationDelegate {
-    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        media.removeAll()
-        showStart = false
-    }
-
-    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
-                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-        let resp = navigationResponse.response
-        let mime = (resp.mimeType ?? "").lowercased()
-        var attachment = false
-        if let http = resp as? HTTPURLResponse,
-           let cd = http.value(forHTTPHeaderField: "Content-Disposition"),
-           cd.lowercased().contains("attachment") {
-            attachment = true
-        }
-        let isVideo = mime.hasPrefix("video/") || mime.contains("mpegurl")
-        if navigationResponse.isForMainFrame, let url = resp.url,
-           isVideo || attachment || !navigationResponse.canShowMIMEType {
-            let isHLS = mime.contains("mpegurl") || url.pathExtension.lowercased() == "m3u8"
-            let name = resp.suggestedFilename.map { ($0 as NSString).deletingPathExtension } ?? ""
-            add(DetectedMedia(url: url, kind: isHLS ? .hls : .file,
-                              title: name.isEmpty ? (webView.title ?? "") : name,
-                              pageURL: webView.url ?? url))
-            showMediaSheet = true
-            decisionHandler(.cancel)
-            return
-        }
-        decisionHandler(.allow)
-    }
-
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        report(error)
-    }
-
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        report(error)
-    }
-
-    private func report(_ error: Error) {
-        let e = error as NSError
-        if e.code == NSURLErrorCancelled || e.code == 102 || e.code == 204 { return }
-        flash("Sayfa açılamadı: \(e.localizedDescription)")
-    }
-}
-
-extension BrowserModel: WKUIDelegate {
-    /// Açılır pencereleri engelle; kullanıcının dokunduğu "yeni sekme" bağlantılarını aynı sayfada aç.
-    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
-                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if navigationAction.targetFrame == nil, navigationAction.navigationType == .linkActivated {
-            webView.load(navigationAction.request)
-        }
-        return nil
-    }
-}
-
-/// WKUserContentController betik işleyicisini güçlü tuttuğu için döngüyü kıran ara sınıf.
-@MainActor
-final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
-    weak var target: WKScriptMessageHandler?
-    init(_ target: WKScriptMessageHandler) { self.target = target }
-    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        target?.userContentController(userContentController, didReceive: message)
     }
 }

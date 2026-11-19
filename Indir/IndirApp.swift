@@ -15,6 +15,7 @@ struct IndirApp: App {
     @StateObject private var downloads = DownloadManager.shared
     @StateObject private var browser = BrowserModel()
     @State private var tab = 0
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         // Sessiz modda da videonun sesi çıksın
@@ -35,6 +36,9 @@ struct IndirApp: App {
             .tint(Theme.accent)
             .environmentObject(downloads)
             .environmentObject(browser)
+            .onChange(of: scenePhase) { phase in
+                if phase != .active { browser.saveSession() }
+            }
             .onReceive(NotificationCenter.default.publisher(for: .showDownloads)) { _ in
                 tab = 1
             }
