@@ -64,53 +64,72 @@ struct TabCard: View {
     let onClose: () -> Void
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 6) {
-                Text(tab.displayTitle)
-                    .font(.caption.weight(.semibold))
-                    .lineLimit(1)
-                Spacer(minLength: 2)
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.caption.bold())
-                        .foregroundColor(.secondary)
-                        .padding(4)
-                }
-                .buttonStyle(.borderless)
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(Color(.secondarySystemBackground))
+        ZStack(alignment: .topTrailing) {
+            // Kartın kendisi: dokununca sekmeye geç
+            Button(action: onSelect) {
+                VStack(spacing: 0) {
+                    HStack {
+                        Text(tab.displayTitle)
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.leading, 8)
+                    .padding(.trailing, 40)   // kapatma düğmesine yer bırak
+                    .frame(height: 34)
+                    .background(Color(.secondarySystemBackground))
 
-            ZStack(alignment: .top) {
-                Color(.systemBackground)
-                if let img = tab.snapshot {
-                    Image(uiImage: img)
-                        .resizable()
-                        .scaledToFill()
-                } else {
-                    VStack(spacing: 6) {
-                        Image(systemName: tab.showStart ? "house" : "globe")
-                            .font(.largeTitle)
-                        if let host = tab.displayURL?.host, !tab.showStart {
-                            Text(host).font(.caption2).lineLimit(1)
+                    ZStack(alignment: .top) {
+                        Color(.systemBackground)
+                        if let img = tab.snapshot {
+                            Image(uiImage: img)
+                                .resizable()
+                                .scaledToFill()
+                        } else {
+                            VStack(spacing: 6) {
+                                Image(systemName: tab.showStart ? "house" : "globe")
+                                    .font(.largeTitle)
+                                if let host = tab.displayURL?.host, !tab.showStart {
+                                    Text(host).font(.caption2).lineLimit(1)
+                                }
+                            }
+                            .foregroundColor(.secondary)
+                            .frame(maxHeight: .infinity)
                         }
                     }
-                    .foregroundColor(.secondary)
-                    .frame(maxHeight: .infinity)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 190)
+                    .clipped()
                 }
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(selected ? Theme.accent : Color.secondary.opacity(0.25),
+                                lineWidth: selected ? 3 : 1)
+                )
             }
-            .frame(maxWidth: .infinity)
-            .frame(height: 190)
-            .clipped()
+            .buttonStyle(.plain)
+
+            // Ayrı kapatma düğmesi (kartın üstünde, geniş dokunma alanı)
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.footnote.bold())
+                    .foregroundColor(.secondary)
+                    .frame(width: 44, height: 34)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Sekmeyi kapat")
         }
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(selected ? Theme.accent : Color.secondary.opacity(0.25), lineWidth: selected ? 3 : 1)
-        )
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onSelect)
+        .contextMenu {
+            Button(action: onSelect) {
+                Label("Sekmeyi aç", systemImage: "arrow.up.forward.square")
+            }
+            Button(role: .destructive, action: onClose) {
+                Label("Sekmeyi kapat", systemImage: "xmark")
+            }
+        }
     }
 }
 
