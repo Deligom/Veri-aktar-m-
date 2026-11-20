@@ -46,7 +46,14 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
         config.allowsInlineMediaPlayback = true
         // Sitelere kendini iPhone Safari olarak tanıt; bazı oynatıcılar uygulama içi tarayıcıda çalışmayı reddediyor
         config.applicationNameForUserAgent = "Version/26.0 Mobile/15E148 Safari/604.1"
-        config.mediaTypesRequiringUserActionForPlayback = .all
+        // Safari ile aynı: sesli oynatma dokunuş ister, sessiz otomatik oynatmaya izin verilir.
+        // (Hepsini engellemek, sessiz başlayan oynatıcıları ve reklam öncesi videoları kilitliyordu.)
+        config.mediaTypesRequiringUserActionForPlayback = .audio
+        config.allowsPictureInPictureMediaPlayback = true
+        config.allowsAirPlayForMediaPlayback = true
+        if #available(iOS 16.4, *) {
+            config.preferences.isElementFullscreenEnabled = true   // oynatıcıların tam ekran düğmesi
+        }
         // Gizli sekme: çerez, önbellek ve site verileri yalnızca bellekte tutulur, kapanınca silinir
         config.websiteDataStore = isPrivate ? .nonPersistent() : .default()
         let controller = WKUserContentController()
