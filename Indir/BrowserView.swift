@@ -119,7 +119,8 @@ struct BrowserContent: View {
             } else if tab.checking > 0 {
                 browser.flash("Videolar kontrol ediliyor…")
             } else {
-                browser.flash("Henüz video bulunamadı. Videoyu oynatmayı deneyin.")
+                tab.rescan()
+                browser.flash("Sayfa yeniden taranıyor… Videoyu oynatmayı deneyin.")
             }
         } label: {
             ZStack(alignment: .topTrailing) {
@@ -367,6 +368,13 @@ struct MediaSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Kapat") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        tab.rescan()
+                    } label: {
+                        Label("Yeniden tara", systemImage: "arrow.clockwise")
+                    }
                 }
             }
         }

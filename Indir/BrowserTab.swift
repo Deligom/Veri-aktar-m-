@@ -94,6 +94,12 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
 
     // MARK: Video yakalama
 
+    /// Sayfayı (iframe'ler dahil) baştan tarar; daha önce denenip gizlenen adresler yeniden denenir.
+    func rescan() {
+        seen.removeAll()
+        webView.evaluateJavaScript("window.__indirRescan && window.__indirRescan(); 0", completionHandler: nil)
+    }
+
     private func resetMedia() {
         generation += 1
         media.removeAll()
@@ -113,8 +119,13 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
             let headers = await owner.headers(url: url, page: page,
                                               store: self.webView.configuration.websiteDataStore)
             if isHLS {
-                guard let variants = await MediaProbe.resolveHLS(url, headers: headers),
-                      gen == self.generation else { return }
+                var resolved = await MediaProbe.resolveHLS(url, headers: headers)
+                if resolved == nil {
+                    // Sunucu geç yanıt verdiyse bir kez daha dene
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    resolved = await MediaProbe.resolveHLS(url, headers: headers)
+                }
+                guard let variants = resolved, gen == self.generation else { return }
                 if variants.first?.isMaster == true {
                     if !self.hasMaster {
                         self.hasMaster = true
@@ -129,8 +140,12 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
                     self.add(DetectedMedia(url: url, kind: .hls, title: title, pageURL: page))
                 }
             } else {
-                guard let info = await MediaProbe.probeFile(url, headers: headers),
-                      gen == self.generation else { return }
+                var probed = await MediaProbe.probeFile(url, headers: headers)
+                if probed == nil {
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    probed = await MediaProbe.probeFile(url, headers: headers)
+                }
+                guard let info = probed, gen == self.generation else { return }
                 self.add(DetectedMedia(url: url, kind: .file, title: title, pageURL: page,
                                        height: MediaProbe.heightFromURL(url), size: info.size,
                                        ext: MediaProbe.extLabel(mime: info.mime, url: url)))
@@ -140,6 +155,7 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
 
     /// Aynı videonun tekrarlarını eler: aynı boyutta dosya, aynı kalitede akış.
     private func add(_ m: DetectedMedia) {
+        if media.contains(where: { $0.url == m.url && $0.kind == m.kind && $0.hlsBitrate == m.hlsBitrate }) { return }
         if m.kind == .file, let s = m.size,
            media.contains(where: { $0.kind == .file && $0.size == s }) { return }
         if m.height > 0, let i = media.firstIndex(where: { $0.height == m.height }) {

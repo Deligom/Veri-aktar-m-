@@ -281,6 +281,12 @@ final class BrowserModel: ObservableObject {
         var h: [String: String] = [:]
         if let ua = userAgent { h["User-Agent"] = ua }
         if let page { h["Referer"] = page.absoluteString }
+        // Oynatıcılar videoyu sayfanın adına ister; bazı sunucular Origin başlığını da bekler
+        if let page, let scheme = page.scheme, let host = page.host, host != url.host {
+            var origin = "\(scheme)://\(host)"
+            if let port = page.port { origin += ":\(port)" }
+            h["Origin"] = origin
+        }
         let cookies = await store.httpCookieStore.allCookies()
         let host = (url.host ?? "").lowercased()
         let matching = cookies.filter { c in

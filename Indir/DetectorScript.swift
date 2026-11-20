@@ -21,7 +21,7 @@ enum DetectorScript {
         if (/^(blob|data):/i.test(u)) { return; }
         u = abs(u);
         if (!u || !/^https?:/i.test(u)) { return; }
-        if (SKIP_RE.test(u.split('?')[0])) { return; }
+        if (SKIP_RE.test(u.split('?')[0]) && !/mpegurl/i.test(type || '')) { return; }
         if (/video\/mp2t/i.test(type || '')) { return; }
         if (seen[u]) { return; }
         seen[u] = 1;
@@ -40,7 +40,29 @@ enum DetectorScript {
         if (VIDEO_RE.test(u)) { report(u, type); }
       }
 
+      // Sayfanın yaptığı tüm ağ isteklerinin listesi (kancalardan kaçanları da yakalar)
+      try { if (performance.setResourceTimingBufferSize) { performance.setResourceTimingBufferSize(3000); } } catch (e) {}
+      var perfIndex = 0;
+      function scanPerf() {
+        try {
+          var list = performance.getEntriesByType('resource');
+          for (; perfIndex < list.length; perfIndex++) { check(list[perfIndex].name, ''); }
+        } catch (e) {}
+      }
+      try {
+        performance.addEventListener('resourcetimingbufferfull', function () {
+          scanPerf();
+          try { performance.clearResourceTimings(); } catch (e) {}
+          perfIndex = 0;
+        });
+      } catch (e) {}
+
+      function isPlaylistText(t) {
+        return typeof t === 'string' && t.replace(/^\uFEFF/, '').slice(0, 7) === '#EXTM3U';
+      }
+
       function scan() {
+        scanPerf();
         try {
           var els = document.querySelectorAll('video, video source');
           for (var i = 0; i < els.length; i++) {
@@ -72,8 +94,17 @@ enum DetectorScript {
           try {
             p.then(function (r) {
               try {
-                var ct = r.headers.get('content-type') || '';
-                if (/mpegurl|^video\//i.test(ct)) { report(r.url || u, ct); }
+                var ct = (r.headers.get('content-type') || '').toLowerCase();
+                var ru = r.url || u;
+                if (/mpegurl|^video\//.test(ct)) { report(ru, ct); return; }
+                // Uzantısız akış listeleri: içeriği "#EXTM3U" ile başlıyor mu?
+                if (r.type === 'opaque' || /image|font|css|javascript|html|json|audio|video/.test(ct)) { return; }
+                if (ru && SKIP_RE.test(String(ru).split('?')[0])) { return; }
+                var len = parseInt(r.headers.get('content-length') || '0', 10);
+                if (len > 3000000) { return; }
+                r.clone().text().then(function (t) {
+                  if (isPlaylistText(t)) { report(ru, 'application/x-mpegurl'); }
+                }).catch(function () {});
               } catch (e) {}
             }).catch(function () {});
           } catch (e) {}
@@ -93,8 +124,16 @@ enum DetectorScript {
         try {
           x.addEventListener('load', function () {
             try {
-              var ct = x.getResponseHeader('content-type') || '';
-              if (/mpegurl|^video\//i.test(ct)) { report(x.responseURL || x.__indirUrl, ct); }
+              var ct = (x.getResponseHeader('content-type') || '').toLowerCase();
+              var xu = x.responseURL || x.__indirUrl;
+              if (/mpegurl|^video\//.test(ct)) { report(xu, ct); return; }
+              if ((x.responseType === '' || x.responseType === 'text') && isPlaylistText(x.responseText)) {
+                report(xu, 'application/x-mpegurl');
+              } else if (x.responseType === 'arraybuffer' && x.response && x.response.byteLength >= 7
+                         && x.response.byteLength < 3000000) {
+                var head = new Uint8Array(x.response, 0, 7);
+                if (String.fromCharCode.apply(null, head) === '#EXTM3U') { report(xu, 'application/x-mpegurl'); }
+              }
             } catch (e) {}
           });
         } catch (e) {}
@@ -123,6 +162,20 @@ enum DetectorScript {
         new MutationObserver(schedule).observe(document.documentElement || document, { childList: true, subtree: true });
       } catch (e) {}
       setInterval(scan, 4000);
+
+      // Uygulamadan "yeniden tara" isteği: bu çerçeveyi ve alt çerçeveleri baştan tara
+      function rescan() {
+        seen = {};
+        perfIndex = 0;
+        scan();
+        try {
+          for (var f = 0; f < window.frames.length; f++) { window.frames[f].postMessage({ __indirRescan: 1 }, '*'); }
+        } catch (e) {}
+      }
+      window.__indirRescan = rescan;
+      window.addEventListener('message', function (e) {
+        try { if (e.data && e.data.__indirRescan) { rescan(); } } catch (err) {}
+      });
     })();
     """#
 }
