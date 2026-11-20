@@ -51,6 +51,13 @@ final class TSRemuxer {
     private var lastDuration: [Bool: Int64] = [true: 3000, false: 1920]
     private var offset: Int64 = 0
 
+    // Yazılmayı bekleyen hazır örnekler. Yazıcı ses ve görüntünün zamanca iç içe gelmesini ister;
+    // hangisi kabul ediliyorsa ondan verilir, böylece ikisi birbirini beklerken kilitlenmez.
+    private var videoQueue: [(sb: CMSampleBuffer, dts: Int64)] = []
+    private var audioQueue: [(sb: CMSampleBuffer, dts: Int64)] = []
+    private var videoFinished = false
+    private var audioFinished = false
+
     init(outputURL: URL) {
         self.outputURL = outputURL
     }
@@ -83,8 +90,9 @@ final class TSRemuxer {
         if let p = pendingAudio, let input = audioInput { try appendSample(p, duration: lastDuration[false] ?? 1920, input: input) }
         pendingVideo = nil
         pendingAudio = nil
-        videoInput?.markAsFinished()
-        audioInput?.markAsFinished()
+        try drain(final: true)
+        if !videoFinished { videoInput?.markAsFinished() }
+        if !audioFinished { audioInput?.markAsFinished() }
         await w.finishWriting()
         guard w.status == .completed else {
             throw RemuxError.writer("MP4 yazılamadı: \(w.error?.localizedDescription ?? "bilinmeyen hata")")
@@ -397,22 +405,66 @@ final class TSRemuxer {
                 pendingAudio = s
             }
         }
+        try drain(final: false)
     }
 
     private func appendSample(_ s: Sample, duration: Int64, input: AVAssetWriterInput) throws {
         guard let format: CMFormatDescription = s.isVideo ? videoFormat : audioFormat,
               let sb = makeSampleBuffer(s, duration: duration, format: format) else { return }
-        var waited = 0
-        while !input.isReadyForMoreMediaData {
+        if s.isVideo {
+            videoQueue.append((sb, s.dts))
+        } else {
+            audioQueue.append((sb, s.dts))
+        }
+    }
+
+    /// Kuyruktaki örnekleri yazıcıya verir. `final` değilse yazıcı başka veri beklediğinde
+    /// geri döner (sonraki parçayla devam edilir); `final` ise hepsi yazılana kadar sürer.
+    private func drain(final: Bool) throws {
+        var idle = 0
+        while !videoQueue.isEmpty || !audioQueue.isEmpty {
             if writer?.status == .failed {
                 throw RemuxError.writer("MP4 yazılamadı: \(writer?.error?.localizedDescription ?? "")")
             }
+            if final {
+                // Bitmiş kanalı kapat ki diğeri onu beklemesin
+                if videoQueue.isEmpty, !videoFinished, let v = videoInput { v.markAsFinished(); videoFinished = true }
+                if audioQueue.isEmpty, !audioFinished, let a = audioInput { a.markAsFinished(); audioFinished = true }
+            }
+            var pickVideo: Bool?
+            let videoReady = !videoQueue.isEmpty && videoInput?.isReadyForMoreMediaData == true
+            let audioReady = !audioQueue.isEmpty && audioInput?.isReadyForMoreMediaData == true
+            if videoReady && audioReady {
+                pickVideo = videoQueue[0].dts <= audioQueue[0].dts
+            } else if videoReady {
+                pickVideo = true
+            } else if audioReady {
+                pickVideo = false
+            }
+
+            if let isVideo = pickVideo, let input = isVideo ? videoInput : audioInput {
+                let item = isVideo ? videoQueue.removeFirst() : audioQueue.removeFirst()
+                if !input.append(item.sb) {
+                    throw RemuxError.writer("MP4 yazılamadı: \(writer?.error?.localizedDescription ?? "örnek eklenemedi")")
+                }
+                idle = 0
+                continue
+            }
+
+            // Hiçbiri kabul edilmiyor
+            if !final && idle > 100 {
+                // Bir kanal uzun süre hiç veri getirmiyorsa (ör. ses kesildi) onu kapat, bellek şişmesin
+                if videoQueue.count > 4000, audioQueue.isEmpty, !audioFinished, let a = audioInput {
+                    a.markAsFinished(); audioFinished = true; idle = 0; continue
+                }
+                if audioQueue.count > 8000, videoQueue.isEmpty, !videoFinished, let v = videoInput {
+                    v.markAsFinished(); videoFinished = true; idle = 0; continue
+                }
+                return
+            }
             usleep(2000)
-            waited += 1
-            if waited > 5000 { throw RemuxError.writer("MP4 yazıcısı yanıt vermiyor") }
-        }
-        if !input.append(sb) {
-            throw RemuxError.writer("MP4 yazılamadı: \(writer?.error?.localizedDescription ?? "örnek eklenemedi")")
+            idle += 1
+            if idle > 15000 { throw RemuxError.writer("MP4 yazıcısı yanıt vermiyor") }
         }
     }
 

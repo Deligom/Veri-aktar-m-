@@ -44,6 +44,8 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
         self.isPrivate = isPrivate
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
+        // Sitelere kendini iPhone Safari olarak tanıt; bazı oynatıcılar uygulama içi tarayıcıda çalışmayı reddediyor
+        config.applicationNameForUserAgent = "Version/26.0 Mobile/15E148 Safari/604.1"
         config.mediaTypesRequiringUserActionForPlayback = .all
         // Gizli sekme: çerez, önbellek ve site verileri yalnızca bellekte tutulur, kapanınca silinir
         config.websiteDataStore = isPrivate ? .nonPersistent() : .default()
